@@ -1,0 +1,19 @@
+# Core numerical & computer vision
+numpy>=2.0.0
+scipy>=1.14.0
+opencv-python>=4.10.0
+
+# Detection backends (optional/runtime for YOLO & ONNX)
+ultralytics>=8.3.0
+onnxruntime>=1.20.0
+
+# Backend API & streaming
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.0
+websockets>=13.0
+python-multipart>=0.0.12
+
+# Testing & HTTP client
+pytest>=8.0.0
+httpx>=0.27.0

@@ -1,0 +1,65 @@
+"""Core detection, Kalman filtering, matching, and ByteTrack tracking modules."""
+
+from core.byte_tracker import ByteTracker, ByteTrackerConfig
+from core.detector_adapter import (
+    Detection,
+    DetectorAdapter,
+    FramePreprocessor,
+    MockDetectorAdapter,
+    ONNXDetectorAdapter,
+    ROISlicePreprocessor,
+    TensorRTDetectorAdapter,
+    YOLODetectorAdapter,
+    create_detector_adapter,
+    decode_yolo_output,
+    detections_to_numpy,
+    gpu_letterbox_batch,
+    letterbox,
+    nms_boxes,
+)
+from core.kalman_filter import KalmanFilter, NSAKalmanFilter
+from core.matching import (
+    appearance_cosine_distance,
+    bbox_diou_matrix,
+    bbox_iou_matrix,
+    class_penalty_matrix,
+    extract_hsv_histogram,
+    fuse_score,
+    iou_distance,
+    linear_assignment,
+    velocity_direction_cost,
+)
+from core.trajectory_pool import STrack, TrackState, TrajectoryPool
+
+__all__ = [
+    "ByteTracker",
+    "ByteTrackerConfig",
+    "Detection",
+    "DetectorAdapter",
+    "FramePreprocessor",
+    "MockDetectorAdapter",
+    "ONNXDetectorAdapter",
+    "ROISlicePreprocessor",
+    "TensorRTDetectorAdapter",
+    "YOLODetectorAdapter",
+    "create_detector_adapter",
+    "decode_yolo_output",
+    "detections_to_numpy",
+    "gpu_letterbox_batch",
+    "letterbox",
+    "nms_boxes",
+    "KalmanFilter",
+    "NSAKalmanFilter",
+    "appearance_cosine_distance",
+    "bbox_diou_matrix",
+    "bbox_iou_matrix",
+    "class_penalty_matrix",
+    "extract_hsv_histogram",
+    "fuse_score",
+    "iou_distance",
+    "linear_assignment",
+    "velocity_direction_cost",
+    "STrack",
+    "TrackState",
+    "TrajectoryPool",
+]

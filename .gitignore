@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local runtime & large assets (weights, datasets, SQLite DB)
+data/
+benchmarks/
+*.db
+*.db-wal
+*.db-shm
+*.pt
+*.onnx
+*.engine
+*.mp4
+*.avi
+
+# Environment & IDE
+.env
+.vscode/
+.idea/
