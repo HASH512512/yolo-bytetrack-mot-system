@@ -47,8 +47,8 @@
                 </div>
                 <div class="text-xs text-slate-400 mt-1 flex flex-wrap gap-x-3 gap-y-1">
                   <span class="truncate max-w-[220px]" :title="task.video_source">源: {{ task.video_source }}</span>
-                  <span class="uppercase text-cyan-300">{{ task.config.detector_type || 'mock' }}</span>
-                  <span>{{ task.config.fps }} FPS</span>
+                  <span class="uppercase text-cyan-300">{{ task.config.detector_type || 'yolo' }}</span>
+                  <span>{{ task.config.fps > 0 ? `${task.config.fps} FPS` : '自适应FPS' }}</span>
                   <span v-if="task.config.adaptive_skip" class="text-emerald-300">
                     <span>跳帧&le;{{ task.config.max_skip_stride || 2 }}</span>
                   </span>
@@ -57,6 +57,12 @@
                   <span>权重: {{ task.config.model_path }}</span>
                 </div>
                 <div class="flex flex-wrap gap-1 mt-1.5 text-[10px]">
+                  <span
+                    v-if="task.config.use_gmc && task.config.gmc_method !== 'none'"
+                    class="badge badge-amber py-0 px-1.5"
+                  >
+                    <span>GMC:{{ task.config.gmc_method || 'sparse_optflow' }}</span>
+                  </span>
                   <span class="badge py-0 px-1.5" :class="task.config.use_class_aware !== false ? 'badge-blue' : 'badge-gray'">
                     <span>ClassAware</span>
                   </span>
@@ -72,7 +78,7 @@
                   <span class="badge py-0 px-1.5" :class="task.config.use_oru !== false ? 'badge-blue' : 'badge-gray'">
                     <span>ORU</span>
                   </span>
-                  <span class="badge py-0 px-1.5" :class="task.config.use_lazy_appearance !== false ? 'badge-blue' : 'badge-gray'">
+                  <span class="badge py-0 px-1.5" :class="task.config.use_lazy_appearance ? 'badge-blue' : 'badge-gray'">
                     <span>LazyHSV</span>
                   </span>
                 </div>
@@ -236,71 +242,194 @@
       v-if="showCreateModal"
       class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
     >
-      <div class="card w-full max-w-xl bg-slate-900 border-slate-700 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+      <div class="card w-full max-w-2xl bg-slate-900 border-slate-700 space-y-4 shadow-2xl max-h-[92vh] overflow-y-auto">
         <div class="flex items-center justify-between border-b border-slate-800 pb-3">
           <h3 class="text-base font-bold text-slate-100">新建跟踪监测任务</h3>
           <button @click="showCreateModal = false" class="text-slate-400 hover:text-slate-200">&#x2715;</button>
         </div>
 
-        <form @submit.prevent="handleCreateTask" class="space-y-3 text-xs">
+        <form @submit.prevent="handleCreateTask" class="space-y-3.5 text-xs">
           <div>
             <label class="block text-slate-300 mb-1 font-medium">任务名称</label>
             <input
               v-model="newTaskForm.name"
               type="text"
               required
-              placeholder="例如: 校园东门主干道监控 (CAM-02)"
+              placeholder="例如: 校园东门主干道监控 / 桌面实时测试"
               class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
             />
           </div>
 
-          <!-- Local Video / Dataset / Demo Picker -->
-          <div class="space-y-1.5">
-            <label class="block text-slate-300 font-medium">视频或图像序列输入源</label>
-            <select
-              v-model="videoSourcePreset"
-              @change="onVideoPresetChange"
-              class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
-            >
-              <optgroup label="演示与实时设备 (Demo / Device)">
+          <!-- Source Type Tabs -->
+          <div class="space-y-2.5 p-3 rounded-xl bg-slate-950/70 border border-slate-800">
+            <label class="block text-slate-300 font-medium">视频输入源类型</label>
+            <div class="flex flex-wrap gap-1.5">
+              <button
+                v-for="tab in sourceTypeTabs"
+                :key="tab.value"
+                type="button"
+                @click="selectSourceType(tab.value)"
+                class="px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors"
+                :class="
+                  sourceType === tab.value
+                    ? 'bg-indigo-600 text-white border-indigo-500'
+                    : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-slate-200'
+                "
+              >
+                {{ tab.label }}
+              </button>
+            </div>
+
+            <!-- Tab 1: Upload MP4 -->
+            <div v-if="sourceType === 'upload'" class="space-y-2 pt-1">
+              <div class="flex flex-wrap items-center gap-2">
+                <input
+                  ref="modalFileInputRef"
+                  type="file"
+                  accept=".mp4,.avi,.mov,.mkv,.webm"
+                  class="hidden"
+                  @change="handleModalFileUpload"
+                />
+                <button
+                  type="button"
+                  :disabled="uploadingModalFile"
+                  @click="modalFileInputRef?.click()"
+                  class="btn btn-primary text-xs py-1.5 px-3"
+                >
+                  <span>{{ uploadingModalFile ? '上传中...' : '\u{1F4E4} 选择并上传视频文件' }}</span>
+                </button>
+                <span v-if="uploadedFileLabel" class="text-emerald-300 font-mono">
+                  <span>已上传: {{ uploadedFileLabel }}</span>
+                </span>
+                <span v-else class="text-slate-400">支持 .mp4 / .avi / .mov / .mkv / .webm</span>
+              </div>
+            </div>
+
+            <!-- Tab 2: Local Webcam -->
+            <div v-else-if="sourceType === 'camera'" class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+              <div>
+                <label class="block text-slate-400 mb-1">摄像头设备编号</label>
+                <select
+                  v-model.number="cameraIndex"
+                  @change="syncCameraUri"
+                  class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-100"
+                >
+                  <option :value="0">默认摄像头 (camera://0)</option>
+                  <option :value="1">外接摄像头 1 (camera://1)</option>
+                  <option :value="2">外接摄像头 2 (camera://2)</option>
+                </select>
+              </div>
+              <div class="flex items-end text-slate-400 text-[11px] pb-1">
+                <span>Windows 下自动优先使用 DirectShow 低延迟采集。</span>
+              </div>
+            </div>
+
+            <!-- Tab 3: PC Screen Capture -->
+            <div v-else-if="sourceType === 'screen'" class="space-y-2 pt-1">
+              <div class="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  @click="applyScreenPreset('full')"
+                  class="px-2.5 py-1 rounded border text-[11px]"
+                  :class="screenMode === 'full' ? 'bg-cyan-600/30 border-cyan-500 text-cyan-200' : 'bg-slate-900 border-slate-700 text-slate-300'"
+                >
+                  <span>全屏采集 (screen://0)</span>
+                </button>
+                <button
+                  type="button"
+                  @click="applyScreenPreset('center')"
+                  class="px-2.5 py-1 rounded border text-[11px]"
+                  :class="screenMode === 'center' ? 'bg-cyan-600/30 border-cyan-500 text-cyan-200' : 'bg-slate-900 border-slate-700 text-slate-300'"
+                >
+                  <span>中心窗口 1280&times;720 (游戏/视频窗)</span>
+                </button>
+                <button
+                  type="button"
+                  @click="screenMode = 'region'"
+                  class="px-2.5 py-1 rounded border text-[11px]"
+                  :class="screenMode === 'region' ? 'bg-cyan-600/30 border-cyan-500 text-cyan-200' : 'bg-slate-900 border-slate-700 text-slate-300'"
+                >
+                  <span>自定义屏幕区域</span>
+                </button>
+              </div>
+
+              <div v-if="screenMode === 'region'" class="grid grid-cols-5 gap-2">
+                <label>
+                  <span class="text-slate-400 block mb-0.5">Monitor</span>
+                  <input v-model.number="screenRegion.monitor" @input="syncScreenUri" type="number" min="0" class="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-100" />
+                </label>
+                <label>
+                  <span class="text-slate-400 block mb-0.5">X</span>
+                  <input v-model.number="screenRegion.x" @input="syncScreenUri" type="number" min="0" class="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-100" />
+                </label>
+                <label>
+                  <span class="text-slate-400 block mb-0.5">Y</span>
+                  <input v-model.number="screenRegion.y" @input="syncScreenUri" type="number" min="0" class="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-100" />
+                </label>
+                <label>
+                  <span class="text-slate-400 block mb-0.5">W</span>
+                  <input v-model.number="screenRegion.w" @input="syncScreenUri" type="number" min="64" class="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-100" />
+                </label>
+                <label>
+                  <span class="text-slate-400 block mb-0.5">H</span>
+                  <input v-model.number="screenRegion.h" @input="syncScreenUri" type="number" min="64" class="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-100" />
+                </label>
+              </div>
+            </div>
+
+            <!-- Tab 4: RTSP Stream -->
+            <div v-else-if="sourceType === 'rtsp'" class="pt-1">
+              <span class="text-[11px] text-slate-400">支持 RTSP / RTMP / HTTP-FLV 等网络摄像机地址（断流自动重连）。</span>
+            </div>
+
+            <!-- Tab 5: Local Asset Path / Demo -->
+            <div v-else class="pt-1">
+              <select
+                v-model="localAssetPreset"
+                @change="onLocalAssetPresetChange"
+                class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
+              >
                 <option value="demo">仿真演示流 (demo - Campus Simulator)</option>
-                <option value="0">本地摄像头 (Device 0)</option>
-                <option value="rtsp://127.0.0.1:8554/live">RTSP 实时视频流模板</option>
-              </optgroup>
-              <optgroup v-if="store.localAssets.videos.length > 0" label="本地视频文件 (data/videos)">
-                <option v-for="v in store.localAssets.videos" :key="`vid-${v}`" :value="v">
-                  {{ v }}
-                </option>
-              </optgroup>
-              <optgroup v-if="store.localAssets.datasets.length > 0" label="本地图像序列集 (data/datasets)">
-                <option v-for="d in store.localAssets.datasets" :key="`ds-${d}`" :value="d">
-                  {{ d }}
-                </option>
-              </optgroup>
-              <option value="__custom__">自定义本地路径 / RTSP URL...</option>
-            </select>
+                <optgroup v-if="store.localAssets.videos.length > 0" label="本地视频 (data/videos & data/uploads)">
+                  <option v-for="v in store.localAssets.videos" :key="`vid-${v}`" :value="v">
+                    {{ v }}
+                  </option>
+                </optgroup>
+                <optgroup v-if="store.localAssets.datasets.length > 0" label="本地图像序列 (data/datasets)">
+                  <option v-for="d in store.localAssets.datasets" :key="`ds-${d}`" :value="d">
+                    {{ d }}
+                  </option>
+                </optgroup>
+                <option value="__custom__">手动输入本地路径...</option>
+              </select>
+            </div>
 
-            <input
-              v-model="newTaskForm.video_source"
-              type="text"
-              required
-              placeholder="输入 demo、本地视频路径、图像序列目录或 rtsp://..."
-              class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
-            />
+            <!-- Editable Resolved Video Source URI -->
+            <div>
+              <label class="block text-slate-400 mb-1">最终输入源 URI / 路径</label>
+              <input
+                v-model="newTaskForm.video_source"
+                type="text"
+                required
+                placeholder="输入 mp4 路径、camera://0、screen://0 或 rtsp://..."
+                class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
+              />
+            </div>
           </div>
 
-          <!-- Detector Backend & Local Weight Picker -->
+          <!-- Detector Backend & Built-in Weight Picker -->
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
             <div>
               <label class="block text-slate-300 mb-1 font-medium">检测器推理后端</label>
               <select
                 v-model="newTaskForm.detector_type"
+                @change="onDetectorBackendChange"
                 class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
               >
-                <option value="mock">Mock 仿真检测器 (无需权重)</option>
-                <option value="tensorrt">TensorRT 引擎 (.engine · GPU 零拷贝)</option>
                 <option value="yolo">Ultralytics YOLO (.pt)</option>
                 <option value="onnx">ONNX Runtime 引擎 (.onnx)</option>
+                <option value="tensorrt">TensorRT 引擎 (.engine)</option>
+                <option value="mock">Mock 仿真检测器 (无需权重)</option>
               </select>
             </div>
 
@@ -319,21 +448,20 @@
 
           <div v-if="newTaskForm.detector_type !== 'mock'" class="space-y-1.5">
             <label class="block text-slate-300 font-medium">
-              <span>本地模型权重路径 (仅加载本地已有文件，禁止自动下载)</span>
+              <span>模型权重路径 (默认内置 weights/yolov8n.pt)</span>
             </label>
             <select
               v-model="weightPreset"
               @change="onWeightPresetChange"
               class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
             >
-              <option value="">
-                {{
-                  store.localAssets.weights.length > 0
-                    ? '-- 从 data/weights 选择本地权重 --'
-                    : '-- data/weights 暂无扫描到权重，请在下方手动输入路径 --'
-                }}
-              </option>
-              <option v-for="w in store.localAssets.weights" :key="`wt-${w}`" :value="w">
+              <option value="weights/yolov8n.pt">weights/yolov8n.pt (内置 YOLOv8n PyTorch)</option>
+              <option value="weights/yolov8n.onnx">weights/yolov8n.onnx (内置 YOLOv8n ONNX)</option>
+              <option
+                v-for="w in extraLocalWeights"
+                :key="`wt-${w}`"
+                :value="w"
+              >
                 {{ w }}
               </option>
               <option value="__custom__">自定义权重文件路径...</option>
@@ -341,30 +469,53 @@
             <input
               v-model="newTaskForm.model_path"
               type="text"
-              placeholder="例如: data/weights/yolov8n.pt 或 data/weights/yolov8n.onnx"
+              placeholder="例如: weights/yolov8n.pt 或 weights/yolov8n.onnx"
               class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
             />
           </div>
 
-          <!-- FPS & Adaptive Keyframe Stride -->
+          <!-- GMC Camera Motion Compensation Section -->
+          <div class="p-3 rounded-lg bg-amber-950/20 border border-amber-800/40 space-y-2">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" v-model="newTaskForm.use_gmc" class="accent-amber-500 rounded" />
+                <span class="text-amber-200 font-medium">启用全局相机运动补偿 (GMC)</span>
+              </label>
+              <select
+                v-model="newTaskForm.gmc_method"
+                :disabled="!newTaskForm.use_gmc"
+                class="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1 text-slate-100 disabled:opacity-50"
+              >
+                <option value="sparse_optflow">航拍光流 (sparse_optflow)</option>
+                <option value="phase">极速相位相关 (phase)</option>
+                <option value="hybrid">混合防甩镜模式 (hybrid)</option>
+                <option value="none">关闭 (none)</option>
+              </select>
+            </div>
+            <p class="text-[11px] text-slate-400">
+              <span>针对无人机航拍、游戏录屏甩镜或手持移动拍摄场景，通过仿射变换修正卡尔曼状态防止 ID 跳变。</span>
+            </p>
+          </div>
+
+          <!-- Playback, FPS & Adaptive Keyframe Stride -->
           <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div>
-              <label class="block text-slate-300 mb-1 font-medium">目标帧率 (FPS)</label>
+              <label class="block text-slate-300 mb-1 font-medium">播放节奏</label>
+              <select
+                v-model="newTaskForm.playback_mode"
+                class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-2 text-slate-100"
+              >
+                <option value="native">固定原速 (native)</option>
+                <option value="uncapped">全速压测 (uncapped)</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-slate-300 mb-1 font-medium">目标帧率 (0=不限)</label>
               <input
                 v-model.number="newTaskForm.fps"
                 type="number"
-                min="5"
-                max="60"
-                class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
-              />
-            </div>
-            <div>
-              <label class="block text-slate-300 mb-1 font-medium">WS 推流 (Hz)</label>
-              <input
-                v-model.number="newTaskForm.downsample_fps"
-                type="number"
-                min="1"
-                max="25"
+                min="0"
+                max="300"
                 class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
               />
             </div>
@@ -387,22 +538,23 @@
                 class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500 disabled:opacity-50"
               >
                 <option :value="1">1 (不跳过)</option>
-                <option :value="2">2 (最多跳 1 帧)</option>
-                <option :value="3">3 (最多跳 2 帧)</option>
-                <option :value="4">4 (最多跳 3 帧)</option>
+                <option :value="2">2 (推荐)</option>
+                <option :value="3">3</option>
+                <option :value="4">4</option>
               </select>
             </div>
           </div>
 
-          <!-- Adaptive Keyframe Detection Toggle -->
-          <div class="p-2.5 rounded-lg bg-slate-800/60 border border-slate-700/60">
-            <label class="flex items-center gap-2 cursor-pointer">
+          <!-- Adaptive Keyframe & ROI Rules Toggles -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <label class="flex items-center gap-2 cursor-pointer p-2.5 rounded-lg bg-slate-800/60 border border-slate-700/60">
               <input type="checkbox" v-model="newTaskForm.adaptive_skip" class="accent-indigo-500 rounded" />
-              <span class="text-slate-200 font-medium">启用自适应关键帧跳帧检测 (Adaptive Keyframe + 卡尔曼补帧)</span>
+              <span class="text-slate-200 font-medium">启用自适应关键帧跳帧</span>
             </label>
-            <p class="text-[11px] text-slate-400 mt-1 pl-5">
-              <span>在目标平稳运动且远离 ROI 边界时跳过检测器前向，使用 Kalman predict_only 保持连续跟踪并统计跳过率。</span>
-            </p>
+            <label class="flex items-center gap-2 cursor-pointer p-2.5 rounded-lg bg-slate-800/60 border border-slate-700/60">
+              <input type="checkbox" v-model="newTaskForm.enable_roi_rules" class="accent-indigo-500 rounded" />
+              <span class="text-slate-200 font-medium">启用 ROI 违章规则检测</span>
+            </label>
           </div>
 
           <!-- ByteTrack Algorithm Ablation Switches -->
@@ -487,13 +639,32 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { useMotStore } from '../stores/motStore';
+import type { GmcMethod } from '../types';
+
+type SourceTab = 'upload' | 'camera' | 'screen' | 'rtsp' | 'local';
 
 const store = useMotStore();
 const showCreateModal = ref(false);
 const activeFilter = ref('all');
 const createError = ref<string | null>(null);
-const videoSourcePreset = ref('demo');
-const weightPreset = ref('');
+
+const sourceType = ref<SourceTab>('upload');
+const modalFileInputRef = ref<HTMLInputElement | null>(null);
+const uploadingModalFile = ref(false);
+const uploadedFileLabel = ref<string | null>(null);
+const cameraIndex = ref(0);
+const screenMode = ref<'full' | 'center' | 'region'>('full');
+const screenRegion = ref({ monitor: 0, x: 320, y: 180, w: 1280, h: 720 });
+const localAssetPreset = ref('demo');
+const weightPreset = ref('weights/yolov8n.pt');
+
+const sourceTypeTabs: { label: string; value: SourceTab }[] = [
+  { label: '本地上传 MP4', value: 'upload' },
+  { label: '本机摄像头', value: 'camera' },
+  { label: 'PC 桌面屏幕采集', value: 'screen' },
+  { label: 'RTSP 网络流', value: 'rtsp' },
+  { label: '本地路径 / 演示', value: 'local' },
+];
 
 const filterOptions = [
   { label: '全部违章', value: 'all' },
@@ -506,22 +677,32 @@ const filterOptions = [
 const newTaskForm = ref({
   name: '',
   video_source: 'demo',
-  detector_type: 'mock',
-  model_path: '',
+  detector_type: 'yolo',
+  model_path: 'weights/yolov8n.pt',
   imgsz: 640,
   conf_threshold: 0.35,
   iou_threshold: 0.5,
-  fps: 25,
+  fps: 0,
+  playback_mode: 'native',
   downsample_fps: 5.0,
-  adaptive_skip: false,
+  enable_roi_rules: false,
+  use_gmc: false,
+  gmc_method: 'sparse_optflow' as GmcMethod,
+  adaptive_skip: true,
   max_skip_stride: 2,
   use_class_aware: true,
   use_nsa: true,
   use_diou: true,
   use_vdc: true,
   use_oru: true,
-  use_lazy_appearance: true,
+  use_lazy_appearance: false,
   use_recovery_pool: true,
+});
+
+const extraLocalWeights = computed(() => {
+  return (store.localAssets.weights || []).filter(
+    (w) => w !== 'weights/yolov8n.pt' && w !== 'weights/yolov8n.onnx'
+  );
 });
 
 function isWrongWay(type: string): boolean {
@@ -540,13 +721,93 @@ const filteredViolations = computed(() => {
 
 function openCreateModal() {
   createError.value = null;
+  uploadedFileLabel.value = null;
   store.fetchLocalAssets();
+  const defW = store.defaultWeightPath || 'weights/yolov8n.pt';
+  newTaskForm.value.model_path = defW;
+  weightPreset.value = defW;
   showCreateModal.value = true;
 }
 
-function onVideoPresetChange() {
-  if (videoSourcePreset.value !== '__custom__') {
-    newTaskForm.value.video_source = videoSourcePreset.value;
+function selectSourceType(tab: SourceTab) {
+  sourceType.value = tab;
+  if (tab === 'camera') {
+    syncCameraUri();
+  } else if (tab === 'screen') {
+    applyScreenPreset(screenMode.value);
+    newTaskForm.value.use_gmc = true;
+    if (newTaskForm.value.gmc_method === 'none') {
+      newTaskForm.value.gmc_method = 'phase';
+    }
+  } else if (tab === 'rtsp') {
+    if (!newTaskForm.value.video_source.startsWith('rtsp://') && !newTaskForm.value.video_source.startsWith('http://')) {
+      newTaskForm.value.video_source = 'rtsp://127.0.0.1:8554/live';
+    }
+  } else if (tab === 'local') {
+    if (localAssetPreset.value !== '__custom__') {
+      newTaskForm.value.video_source = localAssetPreset.value;
+    }
+  }
+}
+
+async function handleModalFileUpload(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  uploadingModalFile.value = true;
+  createError.value = null;
+  try {
+    const uploaded = await store.uploadVideo(file);
+    if (uploaded) {
+      newTaskForm.value.video_source = uploaded.path;
+      uploadedFileLabel.value = `${uploaded.filename} (${(uploaded.size_bytes / (1024 * 1024)).toFixed(1)} MB)`;
+      if (!newTaskForm.value.name.trim()) {
+        newTaskForm.value.name = `上传视频: ${uploaded.filename}`;
+      }
+    } else {
+      createError.value = store.taskError || '视频上传失败';
+    }
+  } finally {
+    uploadingModalFile.value = false;
+    input.value = '';
+  }
+}
+
+function syncCameraUri() {
+  newTaskForm.value.video_source = `camera://${Math.max(0, cameraIndex.value)}`;
+}
+
+function applyScreenPreset(mode: 'full' | 'center' | 'region') {
+  screenMode.value = mode;
+  if (mode === 'full') {
+    newTaskForm.value.video_source = 'screen://0';
+  } else if (mode === 'center') {
+    screenRegion.value = { monitor: 0, x: 320, y: 180, w: 1280, h: 720 };
+    syncScreenUri();
+  } else {
+    syncScreenUri();
+  }
+}
+
+function syncScreenUri() {
+  const r = screenRegion.value;
+  newTaskForm.value.video_source = `screen://${Math.max(0, r.monitor)}?x=${Math.max(0, r.x)}&y=${Math.max(0, r.y)}&w=${Math.max(64, r.w)}&h=${Math.max(64, r.h)}`;
+}
+
+function onLocalAssetPresetChange() {
+  if (localAssetPreset.value !== '__custom__') {
+    newTaskForm.value.video_source = localAssetPreset.value;
+  }
+}
+
+function onDetectorBackendChange() {
+  const dt = newTaskForm.value.detector_type;
+  if (dt === 'onnx' && (!newTaskForm.value.model_path || newTaskForm.value.model_path.endsWith('.pt'))) {
+    newTaskForm.value.model_path = 'weights/yolov8n.onnx';
+    weightPreset.value = 'weights/yolov8n.onnx';
+  } else if (dt === 'yolo' && (!newTaskForm.value.model_path || newTaskForm.value.model_path.endsWith('.onnx'))) {
+    newTaskForm.value.model_path = 'weights/yolov8n.pt';
+    weightPreset.value = 'weights/yolov8n.pt';
   }
 }
 
@@ -563,7 +824,7 @@ function applyPreset(preset: 'full' | 'baseline') {
   newTaskForm.value.use_diou = enabled;
   newTaskForm.value.use_vdc = enabled;
   newTaskForm.value.use_oru = enabled;
-  newTaskForm.value.use_lazy_appearance = enabled;
+  newTaskForm.value.use_lazy_appearance = false;
   newTaskForm.value.use_recovery_pool = true;
 }
 
@@ -627,7 +888,11 @@ async function handleCreateTask() {
       conf_threshold: f.conf_threshold,
       iou_threshold: f.iou_threshold,
       fps: f.fps,
+      playback_mode: f.playback_mode,
       downsample_fps: f.downsample_fps,
+      enable_roi_rules: f.enable_roi_rules,
+      use_gmc: f.use_gmc,
+      gmc_method: f.use_gmc ? f.gmc_method : 'none',
       adaptive_skip: f.adaptive_skip,
       max_skip_stride: f.adaptive_skip ? f.max_skip_stride : 1,
       use_class_aware: f.use_class_aware,

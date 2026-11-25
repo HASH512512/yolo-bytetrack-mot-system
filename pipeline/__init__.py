@@ -4,6 +4,7 @@ from pipeline.batch_scheduler import (
     AdaptiveKeyframeConfig,
     AdaptiveKeyframeController,
     BatchInferenceScheduler,
+    FrameResult,
     PipelineResult,
     StageLatency,
 )
@@ -17,12 +18,21 @@ from pipeline.rules_engine import (
     Violation,
     point_in_polygon,
 )
-from pipeline.video_stream import FramePacket, RingBuffer, VideoStreamReader
+from pipeline.video_stream import (
+    FramePacket,
+    RingBuffer,
+    VideoStreamReader,
+    detect_source_native_fps,
+    is_live_video_source,
+    parse_camera_source,
+    parse_screen_source,
+)
 
 __all__ = [
     "AdaptiveKeyframeConfig",
     "AdaptiveKeyframeController",
     "BatchInferenceScheduler",
+    "FrameResult",
     "MultiStreamBatchCoordinator",
     "PipelineResult",
     "StageLatency",
@@ -37,4 +47,8 @@ __all__ = [
     "FramePacket",
     "RingBuffer",
     "VideoStreamReader",
+    "detect_source_native_fps",
+    "is_live_video_source",
+    "parse_camera_source",
+    "parse_screen_source",
 ]

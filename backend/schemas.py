@@ -54,10 +54,24 @@ class StreamConfig(BaseModel):
     use_class_aware: bool = Field(default=True, description="Enable class-aware matching penalty")
     use_vdc: bool = Field(default=True, description="Enable velocity direction consistency cost")
     use_oru: bool = Field(default=True, description="Enable observation-centric re-update on track recovery")
-    use_lazy_appearance: bool = Field(default=True, description="Enable lazy on-demand HSV appearance gating")
+    use_lazy_appearance: bool = Field(default=False, description="Enable lazy on-demand HSV appearance gating")
+    use_gmc: bool = Field(default=False, description="Enable Global Motion Compensation for moving/aerial cameras")
+    gmc_method: str = Field(default="sparse_optflow", description="GMC method: 'none' | 'sparse_optflow' | 'phase' | 'hybrid'")
     adaptive_skip: bool = Field(default=False, description="Enable adaptive keyframe skipping")
     max_skip_stride: int = Field(default=2, ge=1, le=16, description="Maximum adaptive keyframe skip stride")
     downsample_fps: float = Field(default=5.0, description="WebSocket push rate (Hz)")
+
+    @field_validator("gmc_method", mode="before")
+    @classmethod
+    def _validate_gmc_method(cls, value: Any) -> str:
+        if value is None:
+            return "sparse_optflow"
+        norm = str(value).strip().lower()
+        if norm not in ("none", "sparse_optflow", "phase", "hybrid"):
+            raise ValueError(
+                f"Unsupported gmc_method {value!r}; expected 'none', 'sparse_optflow', 'phase', or 'hybrid'."
+            )
+        return norm
 
 
 class TaskCreate(BaseModel):
@@ -135,6 +149,7 @@ class SystemMetrics(BaseModel):
     drop_count: int = 0
     queue_size: int = 0
     detect_skip_ratio: float = 0.0
+    gmc_shift_px: float = 0.0
     is_demo_simulation: bool = False
     active_streams: int = 0
     stage_latency: PerStageLatency = Field(default_factory=PerStageLatency)

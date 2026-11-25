@@ -16,7 +16,7 @@
               </span>
             </h1>
             <p class="text-[11px] text-slate-400 hidden md:block">
-              <span>FastAPI + SQLite WAL + Vue 3 + ByteTrack (Class-Aware / NSA / DIoU+VDC+ORU / Lazy HSV)</span>
+              <span>FastAPI + SQLite WAL + Vue 3 + ByteTrack (GMC / Class-Aware / NSA / DIoU+VDC+ORU / Lazy HSV)</span>
             </p>
           </div>
         </div>
@@ -152,6 +152,7 @@ onMounted(async () => {
     store.fetchAblation(),
     store.fetchMetrics(),
     store.fetchLocalAssets(),
+    store.fetchStreamPresets(),
     store.fetchLockedBenchmarks(),
   ]);
 });

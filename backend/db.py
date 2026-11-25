@@ -24,7 +24,7 @@ from backend.schemas import (
     ZoneType,
 )
 
-DEFAULT_DB_DIR = Path("D:/Code/GraduationProject/data")
+DEFAULT_DB_DIR = Path(__file__).resolve().parent.parent / "data"
 DEFAULT_DB_PATH = DEFAULT_DB_DIR / "mot_system.db"
 
 

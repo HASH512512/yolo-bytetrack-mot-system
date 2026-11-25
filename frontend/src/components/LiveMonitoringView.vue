@@ -38,7 +38,10 @@
         </div>
         <div class="flex items-center justify-between text-[11px] text-slate-400 mt-2">
           <span>缓存 {{ primaryMetrics.queue_size }} 帧</span>
-          <span>活跃流 {{ primaryMetrics.active_streams ?? activeStreamsFallback }}</span>
+          <span v-if="isGmcEnabled" class="text-amber-300">
+            GMC {{ (primaryMetrics.gmc_shift_px ?? 0).toFixed(1) }} px
+          </span>
+          <span v-else>活跃流 {{ primaryMetrics.active_streams ?? activeStreamsFallback }}</span>
         </div>
       </div>
 
@@ -81,13 +84,42 @@
       </div>
     </div>
 
-    <!-- Homepage Demo Task Start/Stop Control Bar (All Default OFF) -->
-    <div class="card p-3 flex flex-wrap items-center justify-between gap-3 bg-slate-900/90 border border-slate-800">
-      <div class="flex items-center gap-2.5">
-        <span class="text-sm font-semibold text-slate-100">&#x1F3AC; Demo 任务启停控制</span>
-        <span class="text-[11px] text-slate-400">（默认全部关闭，演示时手动点击开启）</span>
+    <!-- Unified Top Task Start/Stop & Stream Ingestion Control Bar -->
+    <div class="card p-3 space-y-3 bg-slate-900/90 border border-slate-800">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="flex items-center gap-2.5">
+          <span class="text-sm font-semibold text-slate-100">&#x1F3AC; 任务启停与流接入控制</span>
+          <span class="text-[11px] text-slate-400">（默认全部关闭，点击开启实时推理）</span>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2">
+          <label
+            class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-950/60 border border-slate-800 text-xs text-slate-300 cursor-pointer"
+            title="开启某个任务时自动关闭其他正在运行的任务，防止多路并发导致推理卡顿"
+          >
+            <input
+              type="checkbox"
+              v-model="store.singleStreamExclusive"
+              class="accent-indigo-500 w-3.5 h-3.5"
+            />
+            <span>单路互斥防卡顿</span>
+          </label>
+
+          <button
+            @click="showQuickIngest = !showQuickIngest"
+            class="btn text-xs py-1.5 px-3 border"
+            :class="
+              showQuickIngest
+                ? 'bg-cyan-600 text-white border-cyan-500'
+                : 'bg-slate-800 text-cyan-300 border-slate-700 hover:bg-slate-700'
+            "
+          >
+            <span>{{ showQuickIngest ? '\u2715 收起流接入' : '+ 快速接入新视频流' }}</span>
+          </button>
+        </div>
       </div>
 
+      <!-- Task Pill List with Single Start/Stop Button per Task -->
       <div class="flex flex-wrap items-center gap-2.5">
         <div
           v-for="t in store.tasks"
@@ -102,7 +134,7 @@
           "
         >
           <button
-            @click="handleSelectDemoTask(t.id)"
+            @click="handleSelectTask(t.id)"
             class="flex items-center gap-1.5 text-left hover:text-white"
             :title="`切换主监控画面至 ${t.name}`"
           >
@@ -116,9 +148,12 @@
                     : 'bg-slate-500'
               "
             ></span>
-            <span class="font-medium">{{ t.name }}</span>
+            <span class="font-medium max-w-[200px] truncate">{{ t.name }}</span>
             <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-900/80 text-slate-400 uppercase">
               {{ t.config?.detector_type || 'yolo' }}
+            </span>
+            <span v-if="t.config?.use_gmc" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300">
+              GMC
             </span>
           </button>
 
@@ -127,34 +162,140 @@
             @click="handleStopTaskById(t.id)"
             class="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-medium transition-colors"
           >
-            关闭
+            <span>停止</span>
           </button>
           <button
             v-else
             @click="handleStartTaskById(t.id)"
             class="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-medium transition-colors"
           >
-            开启
+            <span>开启</span>
           </button>
         </div>
 
-        <label
-          class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-950/60 border border-slate-800 text-xs text-slate-300 cursor-pointer"
-          title="开启某个 Demo 任务时自动关闭其他正在运行的任务，防止双路并发导致推理卡顿"
+        <span v-if="store.tasks.length === 0" class="text-xs text-slate-500">
+          <span>暂无监控任务，请点击右侧「快速接入新视频流」添加视频、摄像头或桌面流。</span>
+        </span>
+      </div>
+
+      <!-- Error Notice -->
+      <div
+        v-if="store.taskError || quickStatusMsg"
+        class="px-3 py-2 rounded-lg text-xs flex items-center justify-between gap-2"
+        :class="
+          store.taskError
+            ? 'bg-rose-950/60 border border-rose-700/70 text-rose-200'
+            : 'bg-emerald-950/50 border border-emerald-700/60 text-emerald-200'
+        "
+      >
+        <span>{{ store.taskError || quickStatusMsg }}</span>
+        <button
+          @click="() => { store.taskError = null; quickStatusMsg = null; }"
+          class="opacity-75 hover:opacity-100"
         >
-          <input
-            type="checkbox"
-            v-model="store.singleStreamExclusive"
-            class="accent-indigo-500 w-3.5 h-3.5"
-          />
-          <span>单路互斥防卡顿</span>
-        </label>
+          <span>&#x2715;</span>
+        </button>
+      </div>
+
+      <!-- Collapsible Quick Stream Ingestion Bar -->
+      <div
+        v-if="showQuickIngest"
+        class="rounded-xl border border-cyan-900/50 bg-slate-950/80 p-3.5 space-y-3 text-xs"
+      >
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="flex items-center gap-2">
+            <span class="font-semibold text-cyan-300">&#x1F680; 快速接入新视频流</span>
+            <span class="text-slate-400">默认使用内置权重 {{ store.defaultWeightPath }} (ROI 检测默认关闭)</span>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <label class="flex items-center gap-1.5 cursor-pointer text-slate-300">
+              <input type="checkbox" v-model="quickUseGmc" class="accent-amber-500" />
+              <span>启用 GMC 运动补偿</span>
+            </label>
+            <select
+              v-model="quickGmcMethod"
+              :disabled="!quickUseGmc"
+              class="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 disabled:opacity-50"
+            >
+              <option value="sparse_optflow">航拍光流 (sparse_optflow)</option>
+              <option value="phase">极速相位相关 (phase)</option>
+              <option value="hybrid">混合防甩镜 (hybrid)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-12 gap-2.5 items-center">
+          <!-- Local Video Upload -->
+          <div class="md:col-span-3">
+            <input
+              ref="quickFileInputRef"
+              type="file"
+              accept=".mp4,.avi,.mov,.mkv,.webm"
+              class="hidden"
+              @change="handleQuickFileUpload"
+            />
+            <button
+              type="button"
+              :disabled="uploadingVideo"
+              @click="triggerQuickFilePicker"
+              class="w-full btn btn-primary text-xs py-2 px-3"
+            >
+              <span>{{ uploadingVideo ? '上传并创建中...' : '\u{1F4E4} 上传本地 MP4/AVI/MOV' }}</span>
+            </button>
+          </div>
+
+          <!-- 1-click Live Presets -->
+          <div class="md:col-span-5 flex flex-wrap gap-2">
+            <button
+              type="button"
+              :disabled="creatingQuickTask"
+              @click="createQuickPresetTask('本机摄像头 (CAM0)', 'camera://0', quickUseGmc)"
+              class="btn btn-secondary text-xs py-2 px-2.5 flex-1"
+            >
+              <span>&#x1F4F7; 本机摄像头</span>
+            </button>
+            <button
+              type="button"
+              :disabled="creatingQuickTask"
+              @click="createQuickPresetTask('PC 桌面全屏采集', 'screen://0', true, 'phase')"
+              class="btn btn-secondary text-xs py-2 px-2.5 flex-1"
+            >
+              <span>&#x1F5A5;&#xFE0F; PC 桌面采集</span>
+            </button>
+            <button
+              type="button"
+              :disabled="creatingQuickTask"
+              @click="createQuickPresetTask('中心窗口采集 (720p)', 'screen://0?x=320&y=180&w=1280&h=720', true, 'hybrid')"
+              class="btn btn-secondary text-xs py-2 px-2.5 flex-1"
+            >
+              <span>&#x1F3AE; 中心窗口采集</span>
+            </button>
+          </div>
+
+          <!-- Custom RTSP / HTTP Stream Input -->
+          <form @submit.prevent="handleQuickRtspSubmit" class="md:col-span-4 flex gap-1.5">
+            <input
+              v-model="quickRtspUrl"
+              type="text"
+              placeholder="rtsp:// 或 http:// 流地址"
+              class="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-100 font-mono focus:outline-none focus:border-cyan-500"
+            />
+            <button
+              type="submit"
+              :disabled="creatingQuickTask || !quickRtspUrl.trim()"
+              class="btn btn-success text-xs py-1.5 px-3 shrink-0"
+            >
+              <span>接入</span>
+            </button>
+          </form>
+        </div>
       </div>
     </div>
 
     <!-- Main Video & Vector Overlay Area -->
     <div class="card p-3 relative bg-slate-950 overflow-hidden space-y-3">
-      <!-- Header Status Badges, Layout Switcher & Layer Toggles -->
+      <!-- Header Status Badges, Layout Switcher & Settings Trigger -->
       <div class="flex flex-wrap items-center justify-between gap-3 px-1">
         <!-- Left Status Badges -->
         <div class="flex flex-wrap items-center gap-2">
@@ -187,6 +328,16 @@
           >
             <span>{{ primaryIsKeyframe ? '\u{1F3AF} 关键帧检测' : '\u26A1 卡尔曼补帧' }}</span>
             <span class="opacity-80">&middot; 跳过率: {{ primarySkipRatioPct }}%</span>
+          </span>
+
+          <!-- GMC Shift Readout Badge -->
+          <span
+            v-if="isGmcEnabled"
+            class="badge badge-amber text-[11px] gap-1"
+            title="全局相机运动补偿已启用 (Global Motion Compensation)"
+          >
+            <span>&#x1F9ED; GMC 位移: {{ (primaryMetrics.gmc_shift_px ?? 0).toFixed(1) }} px</span>
+            <span class="opacity-80">({{ formatGmcMethod(store.activeTask?.config?.gmc_method) }})</span>
           </span>
 
           <!-- Hardware / TensorRT / FP16 / ROI Status Badges -->
@@ -261,27 +412,71 @@
         </div>
       </div>
 
-      <!-- Collapsible Settings Panel -->
+      <!-- Collapsible Settings Drawer -->
       <div
         v-if="showSettingsPanel"
         class="rounded-xl border border-slate-700/80 bg-slate-900/95 p-4 space-y-4 text-xs shadow-lg"
       >
         <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
           <div class="flex items-center gap-2">
-            <span class="font-semibold text-slate-100 text-sm">推理性能、ROI 区域检测与画布显示设置</span>
+            <span class="font-semibold text-slate-100 text-sm">推理引擎、GMC 补偿、ROI 检测与画布设置</span>
             <span class="text-slate-400">(修改运行参数将自动平滑重载当前任务流水线)</span>
           </div>
           <span v-if="savingConfig" class="text-cyan-400 font-medium">正在应用配置并重载推流...</span>
         </div>
 
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <!-- Column 1: ROI Detection (Default OFF) & Display Layers -->
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+          <!-- Card 1: GMC & Lazy HSV -->
           <div class="bg-slate-950/60 border border-slate-800 rounded-lg p-3 space-y-2.5">
-            <div class="font-semibold text-slate-200">1. ROI 区域检测（默认关闭）与图层</div>
+            <div class="font-semibold text-amber-300">1. 相机运动补偿 (GMC) 与外观</div>
+            <label class="flex items-center justify-between gap-2 cursor-pointer bg-slate-900 px-2.5 py-2 rounded border border-slate-800">
+              <div>
+                <div class="text-slate-100 font-medium">开启全局运动补偿 (GMC)</div>
+                <div class="text-[11px] text-slate-400">航拍/游戏/手持晃动视角防 ID 跳变</div>
+              </div>
+              <input
+                type="checkbox"
+                :checked="isGmcEnabled"
+                :disabled="!store.activeTask || savingConfig"
+                @change="handleToggleGmc"
+                class="accent-amber-500 w-4 h-4"
+              />
+            </label>
+
+            <label class="space-y-1 block">
+              <span class="text-slate-400 block">GMC 补偿模式</span>
+              <select
+                :value="store.activeTask?.config?.gmc_method || 'sparse_optflow'"
+                :disabled="!store.activeTask || savingConfig || !isGmcEnabled"
+                @change="(e) => applyActiveConfig({ gmc_method: (e.target as HTMLSelectElement).value as GmcMethod })"
+                class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-100 disabled:opacity-50"
+              >
+                <option value="sparse_optflow">航拍光流 (sparse_optflow)</option>
+                <option value="phase">极速相位相关 (phase)</option>
+                <option value="hybrid">混合防甩镜模式 (hybrid)</option>
+                <option value="none">关闭 (none)</option>
+              </select>
+            </label>
+
+            <label class="flex items-center justify-between gap-2 cursor-pointer bg-slate-900 px-2.5 py-1.5 rounded border border-slate-800">
+              <span class="text-slate-200">Lazy HSV 惰性外观门控</span>
+              <input
+                type="checkbox"
+                :checked="Boolean(store.activeTask?.config?.use_lazy_appearance)"
+                :disabled="!store.activeTask || savingConfig"
+                @change="(e) => applyActiveConfig({ use_lazy_appearance: (e.target as HTMLInputElement).checked })"
+                class="accent-indigo-500 w-4 h-4"
+              />
+            </label>
+          </div>
+
+          <!-- Card 2: ROI Detection (Default OFF) & Display Layers -->
+          <div class="bg-slate-950/60 border border-slate-800 rounded-lg p-3 space-y-2.5">
+            <div class="font-semibold text-slate-200">2. ROI 区域检测（默认关闭）与图层</div>
             <label class="flex items-center justify-between gap-2 cursor-pointer bg-slate-900 px-2.5 py-2 rounded border border-slate-800">
               <div>
                 <div class="text-slate-100 font-medium">开启 ROI 规则检测与区域显示</div>
-                <div class="text-[11px] text-slate-400">未校准实际街景/航拍视角建议保持关闭</div>
+                <div class="text-[11px] text-slate-400">未校准实际场景建议保持关闭</div>
               </div>
               <input
                 type="checkbox"
@@ -316,21 +511,21 @@
             </div>
           </div>
 
-          <!-- Column 2: TensorRT / CUDA Hardware, FP16 & Batching -->
+          <!-- Card 3: Inference Engine, Device & FP16 -->
           <div class="bg-slate-950/60 border border-slate-800 rounded-lg p-3 space-y-2.5">
-            <div class="font-semibold text-slate-200">2. TensorRT / CUDA 加速与微批大小</div>
+            <div class="font-semibold text-slate-200">3. 推理引擎、设备与微批大小</div>
             <div class="grid grid-cols-3 gap-2">
               <label class="space-y-1">
-                <span class="text-slate-400 block">推理后端</span>
+                <span class="text-slate-400 block">推理引擎</span>
                 <select
                   :value="store.activeTask?.config?.detector_type || 'yolo'"
                   :disabled="!store.activeTask || savingConfig"
                   @change="handleDetectorTypeChange"
                   class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-100"
                 >
-                  <option value="tensorrt">TensorRT (.engine)</option>
                   <option value="yolo">PyTorch YOLO (.pt)</option>
                   <option value="onnx">ONNX Runtime</option>
+                  <option value="tensorrt">TensorRT (.engine)</option>
                 </select>
               </label>
               <label class="space-y-1">
@@ -361,7 +556,7 @@
               </label>
             </div>
             <label class="flex items-center justify-between gap-2 cursor-pointer bg-slate-900 px-2.5 py-1.5 rounded border border-slate-800">
-              <span class="text-slate-200">开启 CUDA FP16 半精度推理 (Tensor Core)</span>
+              <span class="text-slate-200">开启 CUDA FP16 半精度推理</span>
               <input
                 type="checkbox"
                 :checked="store.activeTask?.config?.half_precision !== false"
@@ -372,9 +567,9 @@
             </label>
           </div>
 
-          <!-- Column 3: Playback Speed Mode, FPS Cap & Adaptive Keyframe Skip -->
+          <!-- Card 4: Playback Speed Mode & Adaptive Skip -->
           <div class="bg-slate-950/60 border border-slate-800 rounded-lg p-3 space-y-2.5">
-            <div class="font-semibold text-slate-200">3. 播放速度策略与自适应跳帧</div>
+            <div class="font-semibold text-slate-200">4. 播放节奏与自适应跳帧</div>
             <div class="grid grid-cols-3 gap-2">
               <label class="space-y-1">
                 <span class="text-slate-400 block">播放节奏</span>
@@ -384,8 +579,8 @@
                   @change="(e) => applyActiveConfig({ playback_mode: (e.target as HTMLSelectElement).value as 'native' | 'uncapped' })"
                   class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-100"
                 >
-                  <option value="native">固定原速 (按源帧率)</option>
-                  <option value="uncapped">全速压测 (吞吐优先)</option>
+                  <option value="native">固定原速 (native)</option>
+                  <option value="uncapped">全速压测 (uncapped)</option>
                 </select>
               </label>
               <label class="space-y-1">
@@ -419,7 +614,7 @@
               </label>
             </div>
             <label class="flex items-center justify-between gap-2 cursor-pointer bg-slate-900 px-2.5 py-1.5 rounded border border-slate-800">
-              <span class="text-slate-200">开启自适应关键帧跳帧 (非关键帧走卡尔曼外推)</span>
+              <span class="text-slate-200">开启自适应关键帧跳帧 (非关键帧卡尔曼补帧)</span>
               <input
                 type="checkbox"
                 :checked="Boolean(store.activeTask?.config?.adaptive_skip)"
@@ -503,9 +698,9 @@
               >
                 <span class="text-2xl">{{ getTaskStatus(paneTaskId) === 'error' ? '\u274C' : '\u{1F4F7}' }}</span>
                 <span v-if="getTaskStatus(paneTaskId) === 'idle' || getTaskStatus(paneTaskId) === 'stopped'">
-                  演示任务当前已关闭 — 请点击上方「Demo 任务启停控制」中的【开启】按钮启动推流
+                  任务当前未开启 — 请点击上方「任务启停与流接入控制」中的【开启】按钮启动推流
                 </span>
-                <span v-else-if="getTaskStatus(paneTaskId) === 'error'">任务运行异常，请检查本地视频源或权重路径</span>
+                <span v-else-if="getTaskStatus(paneTaskId) === 'error'">任务运行异常，请检查本地视频源、摄像头或权重路径</span>
                 <span v-else>正在等待 MJPEG 视频帧与 WebSocket 跟踪流...</span>
               </div>
 
@@ -558,7 +753,7 @@
         </div>
       </div>
 
-      <!-- Bottom Stream Actions & Resolution / Pipeline Metadata -->
+      <!-- Compact Stream Telemetry Footer (No duplicate Start/Stop buttons) -->
       <div class="flex flex-wrap items-center justify-between gap-2 pt-1 px-1 text-xs">
         <div class="flex flex-wrap items-center gap-4 text-slate-400">
           <span>分辨率: {{ primaryFrameWidth }} &times; {{ primaryFrameHeight }}</span>
@@ -576,9 +771,9 @@
             <strong class="text-emerald-300">
               {{
                 (store.activeTask?.config?.playback_mode || 'native') === 'native'
-                  ? '固定原速 (按源帧率)'
+                  ? '固定原速 (native)'
                   : (store.activeTask?.config?.fps ?? 0) <= 0
-                    ? '全速不限速 (300+ FPS)'
+                    ? '全速不限速 (uncapped)'
                     : `全速限速 ${store.activeTask?.config?.fps} FPS`
               }}
             </strong>
@@ -596,155 +791,30 @@
           <span>跟踪特性: {{ activeFeatureSummary }}</span>
         </div>
 
-        <div class="flex items-center gap-2">
-          <button
-            v-if="store.activeTask?.status !== 'running'"
-            @click="handleStart"
-            :disabled="!store.activeTaskId"
-            class="btn btn-primary text-xs py-1.5 px-3"
-          >
-            <span>&#x25B6; 启动推流</span>
-          </button>
-          <button
-            v-else
-            @click="handleStop"
-            class="btn btn-danger text-xs py-1.5 px-3"
-          >
-            <span>&#x23F9; 停止推流</span>
-          </button>
-          <button
-            @click="handleReconnect"
-            :disabled="!store.activeTaskId || store.activeTask?.status !== 'running'"
-            class="btn btn-secondary text-xs py-1.5 px-3 disabled:opacity-50"
-          >
-            <span>&#x1F504; 重新连接</span>
-          </button>
-        </div>
+        <button
+          @click="handleReconnect"
+          :disabled="!store.activeTaskId || store.activeTask?.status !== 'running'"
+          class="btn btn-secondary text-xs py-1 px-2.5 disabled:opacity-40"
+          title="重新连接当前运行流 WebSocket 与 MJPEG 画面"
+        >
+          <span>&#x1F504; 重连画面</span>
+        </button>
       </div>
     </div>
 
     <!-- Real-Time End-to-End Pipeline Latency Breakdown Line Chart -->
-    <div class="card p-4 bg-slate-900/90 border border-slate-800 space-y-3">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="flex items-center gap-2">
-          <h3 class="text-sm font-semibold text-slate-100">&#x1F4C8; 实时流水线端到端耗时分解折线图 (ms)</h3>
-          <span class="text-[11px] text-slate-400">（最近 {{ latencyHistory.length }} 帧滚动窗口）</span>
-        </div>
-
-        <div class="flex flex-wrap items-center gap-3 text-xs font-mono">
-          <span class="flex items-center gap-1.5 text-slate-200">
-            <span class="w-3 h-0.5 bg-slate-100 inline-block"></span>
-            <span>Total {{ primaryMetrics.stage_latency.total_ms.toFixed(1) }} ms</span>
-          </span>
-          <span class="flex items-center gap-1.5 text-rose-400">
-            <span class="w-3 h-0.5 border-t border-dashed border-rose-400 inline-block"></span>
-            <span>P95 {{ primaryMetrics.p95_latency_ms.toFixed(1) }} ms</span>
-          </span>
-          <span class="flex items-center gap-1.5 text-amber-400">
-            <span class="w-3 h-0.5 bg-amber-400 inline-block"></span>
-            <span>Detect {{ primaryMetrics.stage_latency.detect_ms.toFixed(1) }} ms</span>
-          </span>
-          <span class="flex items-center gap-1.5 text-sky-400">
-            <span class="w-3 h-0.5 bg-sky-400 inline-block"></span>
-            <span>Decode {{ primaryMetrics.stage_latency.decode_ms.toFixed(1) }} ms</span>
-          </span>
-          <span class="flex items-center gap-1.5 text-teal-400">
-            <span class="w-3 h-0.5 bg-teal-400 inline-block"></span>
-            <span>Track {{ primaryMetrics.stage_latency.track_ms.toFixed(1) }} ms</span>
-          </span>
-          <span class="flex items-center gap-1.5 text-emerald-400">
-            <span class="w-3 h-0.5 bg-emerald-400 inline-block"></span>
-            <span>Rules {{ primaryMetrics.stage_latency.rules_ms.toFixed(1) }} ms</span>
-          </span>
-        </div>
-      </div>
-
-      <div class="relative w-full h-44 bg-slate-950/90 rounded-lg border border-slate-800/80 overflow-hidden">
-        <svg
-          v-if="latencyHistory.length >= 2"
-          viewBox="0 0 800 180"
-          preserveAspectRatio="none"
-          class="w-full h-full block"
-        >
-          <!-- Horizontal gridlines & ms labels -->
-          <g v-for="(tick, idx) in latencyGridTicks" :key="`grid-${idx}`">
-            <line
-              x1="44"
-              :y1="tick.y"
-              x2="788"
-              :y2="tick.y"
-              stroke="rgba(51, 65, 85, 0.55)"
-              stroke-dasharray="3 3"
-              stroke-width="1"
-            />
-            <text
-              x="38"
-              :y="tick.y + 3"
-              text-anchor="end"
-              fill="#64748b"
-              font-size="10"
-              font-family="monospace"
-            >
-              {{ tick.label }}
-            </text>
-          </g>
-
-          <!-- P95 reference curve -->
-          <polyline
-            fill="none"
-            stroke="#fb7185"
-            stroke-width="1.6"
-            stroke-dasharray="5 4"
-            :points="latencyPolylines.p95"
-          />
-          <!-- Stage series -->
-          <polyline
-            fill="none"
-            stroke="#34d399"
-            stroke-width="1.6"
-            :points="latencyPolylines.rules"
-          />
-          <polyline
-            fill="none"
-            stroke="#2dd4bf"
-            stroke-width="1.8"
-            :points="latencyPolylines.track"
-          />
-          <polyline
-            fill="none"
-            stroke="#38bdf8"
-            stroke-width="1.8"
-            :points="latencyPolylines.decode"
-          />
-          <polyline
-            fill="none"
-            stroke="#fbbf24"
-            stroke-width="2"
-            :points="latencyPolylines.detect"
-          />
-          <polyline
-            fill="none"
-            stroke="#f1f5f9"
-            stroke-width="2.2"
-            :points="latencyPolylines.total"
-          />
-        </svg>
-        <div
-          v-else
-          class="w-full h-full flex items-center justify-center text-xs text-slate-500"
-        >
-          <span>开启 Demo 任务推流后将实时绘制各流水线阶段端到端耗时曲线...</span>
-        </div>
-      </div>
-    </div>
+    <LatencyChart :history="latencyHistory" :metrics="primaryMetrics" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch, type ComponentPublicInstance } from 'vue';
 import { useMotStore } from '../stores/motStore';
+import LatencyChart from './LatencyChart.vue';
 import type {
   DetectorType,
+  GmcMethod,
+  LatencySample,
   StreamConfig,
   SystemMetrics,
   TrackFrame,
@@ -755,22 +825,21 @@ import type {
 
 type LayoutMode = '1x1' | '2x1' | '2x2';
 
-interface LatencySample {
-  frameId: number;
-  total: number;
-  p95: number;
-  decode: number;
-  detect: number;
-  track: number;
-  rules: number;
-}
-
 const MAX_LATENCY_POINTS = 60;
 
 const store = useMotStore();
 const layoutMode = ref<LayoutMode>('1x1');
 const showSettingsPanel = ref(false);
+const showQuickIngest = ref(false);
 const savingConfig = ref(false);
+const uploadingVideo = ref(false);
+const creatingQuickTask = ref(false);
+const quickStatusMsg = ref<string | null>(null);
+const quickUseGmc = ref(false);
+const quickGmcMethod = ref<GmcMethod>('sparse_optflow');
+const quickRtspUrl = ref('rtsp://127.0.0.1:8554/live');
+const quickFileInputRef = ref<HTMLInputElement | null>(null);
+
 const paneSelections = ref<(number | null)[]>([null, null, null, null]);
 const canvasRefs = ref<Record<number, HTMLCanvasElement>>({});
 const mjpegEpochs = ref<Record<number, number>>({});
@@ -814,54 +883,6 @@ watch(
     latencyHistory.value = next;
   }
 );
-
-const latencySvgMax = computed(() => {
-  if (latencyHistory.value.length === 0) return 20;
-  let peak = 20;
-  for (const s of latencyHistory.value) {
-    peak = Math.max(peak, s.total, s.p95, s.detect + s.decode + s.track + s.rules);
-  }
-  return Math.max(20, Math.ceil((peak * 1.1) / 10) * 10);
-});
-
-const latencyGridTicks = computed(() => {
-  const maxMs = latencySvgMax.value;
-  const topY = 16;
-  const bottomY = 164;
-  return [0, 0.333, 0.667, 1].map((frac) => {
-    const val = Math.round(maxMs * frac);
-    const y = Number((bottomY - frac * (bottomY - topY)).toFixed(1));
-    return { y, label: `${val}` };
-  });
-});
-
-function buildLatencyPolyline(key: keyof Omit<LatencySample, 'frameId'>): string {
-  const pts = latencyHistory.value;
-  if (pts.length < 2) return '';
-  const maxMs = Math.max(1, latencySvgMax.value);
-  const leftX = 48;
-  const rightX = 786;
-  const topY = 16;
-  const bottomY = 164;
-  const stepX = (rightX - leftX) / Math.max(1, pts.length - 1);
-  return pts
-    .map((sample, idx) => {
-      const x = (leftX + idx * stepX).toFixed(1);
-      const clamped = Math.max(0, Math.min(maxMs, sample[key]));
-      const y = (bottomY - (clamped / maxMs) * (bottomY - topY)).toFixed(1);
-      return `${x},${y}`;
-    })
-    .join(' ');
-}
-
-const latencyPolylines = computed(() => ({
-  total: buildLatencyPolyline('total'),
-  p95: buildLatencyPolyline('p95'),
-  detect: buildLatencyPolyline('detect'),
-  decode: buildLatencyPolyline('decode'),
-  track: buildLatencyPolyline('track'),
-  rules: buildLatencyPolyline('rules'),
-}));
 
 const layoutOptions: { label: string; value: LayoutMode }[] = [
   { label: '单路详览 (1\u00D71)', value: '1x1' },
@@ -932,17 +953,12 @@ function handlePaneTaskChange(paneIdx: number, e: Event) {
 
 function getPaneFrame(taskId: number | null): TrackFrame | null {
   if (!taskId) return null;
-  if (layoutMode.value === '1x1' && taskId === store.activeTaskId) {
-    return store.currentFrame || store.multiFrames[taskId] || null;
-  }
-  return store.multiFrames[taskId] || (taskId === store.activeTaskId ? store.currentFrame : null);
+  return store.framesByTask[taskId] || null;
 }
 
 function getPaneZones(taskId: number | null): Zone[] {
   if (!taskId) return [];
-  if (store.multiZones[taskId]) return store.multiZones[taskId];
-  if (taskId === store.activeTaskId) return store.zones;
-  return [];
+  return store.zonesByTask[taskId] || [];
 }
 
 function getPaneViolations(taskId: number | null): ViolationEvent[] {
@@ -1030,16 +1046,34 @@ const primarySkipRatioPct = computed(() => {
 const primaryFrameWidth = computed(() => getFrameWidth(store.activeTaskId));
 const primaryFrameHeight = computed(() => getFrameHeight(store.activeTaskId));
 
+const isGmcEnabled = computed(() => {
+  return Boolean(store.activeTask?.config?.use_gmc) && store.activeTask?.config?.gmc_method !== 'none';
+});
+
+function formatGmcMethod(method?: string): string {
+  switch (method) {
+    case 'phase':
+      return '极速相位相关';
+    case 'hybrid':
+      return '混合防甩镜';
+    case 'sparse_optflow':
+      return '航拍光流';
+    default:
+      return '未开启';
+  }
+}
+
 const activeFeatureSummary = computed(() => {
   const cfg = store.activeTask?.config;
-  if (!cfg) return 'Class-Aware + NSA + DIoU + VDC + ORU + LazyHSV';
+  if (!cfg) return 'Class-Aware + NSA + DIoU + VDC + ORU';
   const parts: string[] = [];
+  if (cfg.use_gmc && cfg.gmc_method !== 'none') parts.push(`GMC(${cfg.gmc_method || 'sparse_optflow'})`);
   if (cfg.use_class_aware !== false) parts.push('ClassAware');
   if (cfg.use_nsa) parts.push('NSA');
   if (cfg.use_diou) parts.push('DIoU');
   if (cfg.use_vdc !== false) parts.push('VDC');
   if (cfg.use_oru !== false) parts.push('ORU');
-  if (cfg.use_lazy_appearance !== false) parts.push('LazyHSV');
+  if (cfg.use_lazy_appearance) parts.push('LazyHSV');
   if (cfg.use_recovery_pool) parts.push('Pool');
   return parts.length > 0 ? parts.join(' / ') : 'Baseline ByteTrack';
 });
@@ -1054,6 +1088,99 @@ const isCudaActive = computed(() => {
 const isRoiRulesEnabled = computed(() => {
   return Boolean(store.activeTask?.config?.enable_roi_rules);
 });
+
+function triggerQuickFilePicker() {
+  quickFileInputRef.value?.click();
+}
+
+function buildQuickTaskConfig(videoSource: string, useGmc: boolean, gmcMethod: GmcMethod): Partial<StreamConfig> {
+  const weightPath = store.defaultWeightPath;
+  const detType: DetectorType = weightPath.toLowerCase().endsWith('.onnx')
+    ? 'onnx'
+    : weightPath.toLowerCase().endsWith('.engine')
+      ? 'tensorrt'
+      : 'yolo';
+  return {
+    video_source: videoSource,
+    detector_type: detType,
+    model_path: weightPath,
+    device: 'cuda:0',
+    half_precision: true,
+    batch_size: 8,
+    imgsz: 640,
+    conf_threshold: 0.35,
+    iou_threshold: 0.5,
+    fps: 0,
+    playback_mode: 'native',
+    enable_roi_rules: false,
+    use_gmc: useGmc,
+    gmc_method: useGmc ? gmcMethod : 'none',
+    use_class_aware: true,
+    use_nsa: true,
+    use_diou: true,
+    use_vdc: true,
+    use_oru: true,
+    use_lazy_appearance: false,
+    use_recovery_pool: true,
+    adaptive_skip: true,
+    max_skip_stride: 2,
+    downsample_fps: 5.0,
+  };
+}
+
+async function handleQuickFileUpload(e: Event) {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  uploadingVideo.value = true;
+  quickStatusMsg.value = null;
+  try {
+    const uploaded = await store.uploadVideo(file);
+    if (uploaded) {
+      const taskName = `本地视频: ${uploaded.filename}`;
+      const created = await store.createTask({
+        name: taskName,
+        video_source: uploaded.path,
+        config: buildQuickTaskConfig(uploaded.path, quickUseGmc.value, quickGmcMethod.value),
+      });
+      if (created) {
+        quickStatusMsg.value = `已上传 ${uploaded.filename} 并创建任务 #${created.id}，点击上方【开启】即可开始推流。`;
+      }
+    }
+  } finally {
+    uploadingVideo.value = false;
+    input.value = '';
+  }
+}
+
+async function createQuickPresetTask(
+  name: string,
+  videoSource: string,
+  useGmc: boolean,
+  overrideGmcMethod?: GmcMethod
+) {
+  creatingQuickTask.value = true;
+  quickStatusMsg.value = null;
+  try {
+    const method = overrideGmcMethod || quickGmcMethod.value;
+    const created = await store.createTask({
+      name,
+      video_source: videoSource,
+      config: buildQuickTaskConfig(videoSource, useGmc, method),
+    });
+    if (created) {
+      quickStatusMsg.value = `已创建任务「${created.name}」(${videoSource})，点击上方【开启】即可启动推理。`;
+    }
+  } finally {
+    creatingQuickTask.value = false;
+  }
+}
+
+async function handleQuickRtspSubmit() {
+  const url = quickRtspUrl.value.trim();
+  if (!url) return;
+  await createQuickPresetTask(`网络流 (${url.slice(0, 28)})`, url, quickUseGmc.value);
+}
 
 async function applyActiveConfig(patch: Partial<StreamConfig>) {
   if (!store.activeTaskId || savingConfig.value) return;
@@ -1076,6 +1203,18 @@ async function handleToggleRoiRules(e: Event) {
   await applyActiveConfig({ enable_roi_rules: checked });
 }
 
+async function handleToggleGmc(e: Event) {
+  const checked = (e.target as HTMLInputElement).checked;
+  const curMethod = store.activeTask?.config?.gmc_method;
+  const nextMethod: GmcMethod = checked
+    ? (curMethod && curMethod !== 'none' ? (curMethod as GmcMethod) : 'sparse_optflow')
+    : 'none';
+  await applyActiveConfig({
+    use_gmc: checked,
+    gmc_method: nextMethod,
+  });
+}
+
 function formatViolationTitle(type: string): string {
   switch (type) {
     case 'wrong_way':
@@ -1090,7 +1229,7 @@ function formatViolationTitle(type: string): string {
   }
 }
 
-function handleSelectDemoTask(id: number) {
+function handleSelectTask(id: number) {
   store.setActiveTask(id);
   store.fetchViolations();
 }
@@ -1122,7 +1261,7 @@ async function handleDetectorTypeChange(e: Event) {
     onnx: '.onnx',
   };
   const targetExt = extMap[newType];
-  let nextModelPath = cfg.model_path || 'data/weights/yolov8s.pt';
+  let nextModelPath = cfg.model_path || store.defaultWeightPath;
 
   if (targetExt) {
     const curNorm = nextModelPath.replace(/\\/g, '/');
@@ -1131,8 +1270,8 @@ async function handleDetectorTypeChange(e: Event) {
     if (localWeights.includes(candidate)) {
       nextModelPath = candidate;
     } else {
-      const sameStem = localWeights.find((w) => w.toLowerCase().endsWith(targetExt));
-      nextModelPath = sameStem || `data/weights/yolov8s${targetExt}`;
+      const matchingExt = localWeights.find((w) => w.toLowerCase().endsWith(targetExt));
+      nextModelPath = matchingExt || `weights/yolov8n${targetExt}`;
     }
   }
 
@@ -1142,23 +1281,12 @@ async function handleDetectorTypeChange(e: Event) {
   });
 }
 
-async function handleStart() {
-  if (!store.activeTaskId) return;
-  await handleStartTaskById(store.activeTaskId);
-}
-
-async function handleStop() {
-  if (store.activeTaskId) {
-    await handleStopTaskById(store.activeTaskId);
-  }
-}
-
 function handleReconnect() {
   if (!store.activeTaskId) return;
   const tid = store.activeTaskId;
   mjpegErrored.value = { ...mjpegErrored.value, [tid]: false };
   mjpegEpochs.value = { ...mjpegEpochs.value, [tid]: Date.now() };
-  store.connectWebSocket(tid);
+  store.connectTaskWs(tid);
   if (layoutMode.value !== '1x1') {
     for (const id of visiblePaneTaskIds.value) {
       if (id) {
@@ -1400,7 +1528,7 @@ onMounted(() => {
   mjpegEpochs.value = nextEpochs;
   mjpegErrored.value = nextErrored;
   if (store.activeTaskId && store.activeTask?.status === 'running' && !store.wsConnected) {
-    store.connectWebSocket(store.activeTaskId);
+    store.connectTaskWs(store.activeTaskId);
   }
   animationId = requestAnimationFrame(renderLoop);
 });

@@ -176,6 +176,108 @@ def velocity_direction_cost(
     return np.where(valid, 0.5 * (1.0 - cos_sim), 0.0).astype(np.float64)
 
 
+def _hsv_crop_to_feat(
+    hsv_crop: np.ndarray,
+    h_bins: int = 16,
+    s_bins: int = 8,
+) -> Optional[np.ndarray]:
+    """Compute L2-normalized upper/lower split HSV histogram from an HSV crop."""
+    if hsv_crop.shape[0] < 4 or hsv_crop.shape[1] < 4:
+        return None
+    mid = hsv_crop.shape[0] // 2
+    parts = (hsv_crop[:mid, :], hsv_crop[mid:, :])
+
+    hists = []
+    for part in parts:
+        hist = (
+            cv2.calcHist(
+                [part],
+                [0, 1],
+                None,
+                [int(h_bins), int(s_bins)],
+                [0, 180, 0, 256],
+            )
+            .reshape(-1)
+            .astype(np.float32)
+        )
+        pnorm = float(np.linalg.norm(hist))
+        if pnorm > 1e-8:
+            hist = hist / pnorm
+        hists.append(hist)
+
+    feat = np.concatenate(hists).astype(np.float32)
+    total_norm = float(np.linalg.norm(feat))
+    if total_norm <= 1e-8:
+        return None
+    return (feat / total_norm).astype(np.float32)
+
+
+def prepare_downsampled_hsv(
+    frame: Optional[np.ndarray],
+    max_dim: int = 640,
+) -> Optional[Tuple[np.ndarray, float, float, int, int]]:
+    """Convert BGR frame to downsampled HSV once per frame for cached crop queries."""
+    if frame is None or not isinstance(frame, np.ndarray):
+        return None
+    if frame.ndim < 3 or frame.shape[2] < 3 or frame.size == 0:
+        return None
+
+    img_h, img_w = int(frame.shape[0]), int(frame.shape[1])
+    bgr = frame[:, :, :3]
+    if bgr.dtype != np.uint8:
+        if np.issubdtype(bgr.dtype, np.floating) and float(np.max(bgr)) <= 1.0:
+            bgr = np.clip(bgr * 255.0, 0.0, 255.0).astype(np.uint8)
+        else:
+            bgr = np.clip(bgr, 0, 255).astype(np.uint8)
+
+    if max(img_h, img_w) > int(max_dim):
+        scale = float(max_dim) / float(max(img_h, img_w))
+        new_w = max(8, int(round(img_w * scale)))
+        new_h = max(8, int(round(img_h * scale)))
+        bgr = cv2.resize(bgr, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        sx = float(new_w) / float(img_w)
+        sy = float(new_h) / float(img_h)
+    else:
+        sx = 1.0
+        sy = 1.0
+
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    return hsv, sx, sy, img_h, img_w
+
+
+def extract_hsv_histogram_from_hsv(
+    hsv_cache: Optional[Tuple[np.ndarray, float, float, int, int]],
+    bbox: np.ndarray,
+    h_bins: int = 16,
+    s_bins: int = 8,
+    fallback_frame: Optional[np.ndarray] = None,
+) -> Optional[np.ndarray]:
+    """Extract L2-normalized HSV histogram from a pre-converted frame HSV cache."""
+    if hsv_cache is None:
+        return extract_hsv_histogram(fallback_frame, bbox, h_bins=h_bins, s_bins=s_bins)
+
+    hsv_img, sx, sy, img_h, img_w = hsv_cache
+    box = np.asarray(bbox, dtype=np.float64).reshape(4)
+    ox1 = max(0, int(np.floor(box[0])))
+    oy1 = max(0, int(np.floor(box[1])))
+    ox2 = min(img_w, int(np.ceil(box[2])))
+    oy2 = min(img_h, int(np.ceil(box[3])))
+    if (ox2 - ox1) < 4 or (oy2 - oy1) < 4:
+        return None
+
+    sh, sw = hsv_img.shape[:2]
+    x1 = max(0, int(np.floor(ox1 * sx)))
+    y1 = max(0, int(np.floor(oy1 * sy)))
+    x2 = min(sw, int(np.ceil(ox2 * sx)))
+    y2 = min(sh, int(np.ceil(oy2 * sy)))
+    if (x2 - x1) < 4 or (y2 - y1) < 4:
+        if fallback_frame is not None:
+            return extract_hsv_histogram(fallback_frame, bbox, h_bins=h_bins, s_bins=s_bins)
+        return None
+
+    return _hsv_crop_to_feat(hsv_img[y1:y2, x1:x2], h_bins=h_bins, s_bins=s_bins)
+
+
 def extract_hsv_histogram(
     frame: Optional[np.ndarray],
     bbox: np.ndarray,
@@ -212,32 +314,7 @@ def extract_hsv_histogram(
             crop = np.clip(crop, 0, 255).astype(np.uint8)
 
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    mid = hsv.shape[0] // 2
-    parts = (hsv[:mid, :], hsv[mid:, :])
-
-    hists = []
-    for part in parts:
-        hist = (
-            cv2.calcHist(
-                [part],
-                [0, 1],
-                None,
-                [int(h_bins), int(s_bins)],
-                [0, 180, 0, 256],
-            )
-            .reshape(-1)
-            .astype(np.float32)
-        )
-        pnorm = float(np.linalg.norm(hist))
-        if pnorm > 1e-8:
-            hist = hist / pnorm
-        hists.append(hist)
-
-    feat = np.concatenate(hists).astype(np.float32)
-    total_norm = float(np.linalg.norm(feat))
-    if total_norm <= 1e-8:
-        return None
-    return (feat / total_norm).astype(np.float32)
+    return _hsv_crop_to_feat(hsv, h_bins=h_bins, s_bins=s_bins)
 
 
 def appearance_cosine_distance(

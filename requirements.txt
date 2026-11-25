@@ -2,6 +2,7 @@
 numpy>=2.0.0
 scipy>=1.14.0
 opencv-python>=4.10.0
+pillow>=10.0.0
 
 # Detection backends (optional/runtime for YOLO & ONNX)
 ultralytics>=8.3.0

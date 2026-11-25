@@ -638,3 +638,165 @@ def test_task_frame_replay_image_endpoint(client):
         assert resp.content.endswith(b"\xff\xd9")
     finally:
         client.delete(f"/api/tasks/{task_id}")
+
+
+def test_builtin_weights_assets_and_stream_presets(client):
+    for endpoint in ("/api/assets", "/api/local-assets"):
+        res = client.get(endpoint)
+        assert res.status_code == 200
+        data = res.json()
+        assert "weights/yolov8n.pt" in data["weights"]
+        assert "weights/yolov8n.onnx" in data["weights"]
+
+    preset_res = client.get("/api/stream_presets")
+    assert preset_res.status_code == 200
+    pdata = preset_res.json()
+    assert "weights/yolov8n.pt" in pdata["weights"]
+    sources = [p["source"] for p in pdata["presets"]]
+    assert "camera://0" in sources
+    assert "screen://0" in sources
+    assert "screen://0?x=320&y=180&w=1280&h=720" in sources
+    assert any(s.startswith("rtsp://") for s in sources)
+
+
+def test_video_upload_endpoint(client):
+    from backend.stream_engine import PROJECT_ROOT
+
+    bad_ext = client.post(
+        "/api/videos/upload",
+        files={"file": ("notes.txt", b"not a video", "text/plain")},
+    )
+    assert bad_ext.status_code == 400
+
+    empty_mp4 = client.post(
+        "/api/videos/upload",
+        files={"file": ("empty.mp4", b"", "video/mp4")},
+    )
+    assert empty_mp4.status_code == 400
+
+    ok_res = client.post(
+        "/api/videos/upload",
+        files={"file": ("sample clip!.mp4", b"\x00\x00\x00\x18ftypmp42", "video/mp4")},
+    )
+    assert ok_res.status_code == 200
+    body = ok_res.json()
+    assert body["path"].startswith("data/uploads/")
+    assert body["filename"].endswith(".mp4")
+    assert body["size_bytes"] > 0
+
+    uploaded_path = PROJECT_ROOT / body["path"]
+    try:
+        assert uploaded_path.is_file()
+    finally:
+        uploaded_path.unlink(missing_ok=True)
+
+
+def test_gmc_task_config_and_metrics(client):
+    default_cfg = StreamConfig()
+    assert default_cfg.use_lazy_appearance is False
+    assert default_cfg.use_gmc is False
+    assert default_cfg.gmc_method == "sparse_optflow"
+
+    task_res = client.post(
+        "/api/tasks",
+        json={
+            "name": "GMC Config Task",
+            "video_source": "demo",
+            "config": {
+                "video_source": "demo",
+                "detector_type": "mock",
+                "use_gmc": True,
+                "gmc_method": "hybrid",
+            },
+        },
+    )
+    assert task_res.status_code == 201
+    task = task_res.json()
+    task_id = task["id"]
+    assert task["config"]["use_gmc"] is True
+    assert task["config"]["gmc_method"] == "hybrid"
+    assert task["config"]["use_lazy_appearance"] is False
+
+    try:
+        with client.websocket_connect(f"/ws/stream/{task_id}") as ws:
+            frame = json.loads(ws.receive_text())
+            assert "gmc_shift_px" in frame["metrics"]
+
+        m_res = client.get("/api/metrics")
+        assert m_res.status_code == 200
+        assert "gmc_shift_px" in m_res.json()
+    finally:
+        client.post(f"/api/tasks/{task_id}/stop")
+        client.delete(f"/api/tasks/{task_id}")
+
+
+def test_replay_cache_persists_after_stop(client):
+    import numpy as np
+    from backend.stream_engine import PROJECT_ROOT, TaskStreamRunner, stream_manager
+
+    # 1. End-to-end demo run -> stop -> replay frame served from disk cache
+    task_res = client.post(
+        "/api/tasks",
+        json={"name": "Replay Cache Persistence Test", "video_source": "demo"},
+    )
+    assert task_res.status_code == 201
+    task_id = task_res.json()["id"]
+
+    try:
+        with client.websocket_connect(f"/ws/stream/{task_id}") as ws:
+            _ = json.loads(ws.receive_text())
+
+        tracks_res = client.get(f"/api/tracks?task_id={task_id}")
+        assert tracks_res.status_code == 200
+        points = tracks_res.json()["points"]
+        assert len(points) >= 1
+        fid = points[0]["frame_id"]
+
+        stop_res = client.post(f"/api/tasks/{task_id}/stop")
+        assert stop_res.status_code == 200
+        assert stream_manager.get_runner(task_id) is None
+
+        cache_jpg = PROJECT_ROOT / "data" / "replay_cache" / f"task_{task_id}" / f"{fid}.jpg"
+        assert cache_jpg.is_file()
+
+        frame_res = client.get(f"/api/tasks/{task_id}/frame/{fid}")
+        assert frame_res.status_code == 200
+        assert frame_res.headers.get("content-type", "").startswith("image/jpeg")
+        assert int(frame_res.headers.get("x-frame-width", "0")) == 1280
+        assert int(frame_res.headers.get("x-frame-height", "0")) == 720
+        assert frame_res.content.startswith(b"\xff\xd8")
+    finally:
+        client.post(f"/api/tasks/{task_id}/stop")
+        client.delete(f"/api/tasks/{task_id}")
+
+    # 2. Verify live stream (screen://0) replay cache works cleanly after runner stops
+    screen_res = client.post(
+        "/api/tasks",
+        json={
+            "name": "Screen Replay Cache Test",
+            "video_source": "screen://0",
+            "config": {
+                "video_source": "screen://0",
+                "detector_type": "yolo",
+                "model_path": "weights/yolov8n.pt",
+            },
+        },
+    )
+    assert screen_res.status_code == 201
+    screen_id = screen_res.json()["id"]
+    try:
+        from backend.db import db
+
+        task_obj = db.get_task(screen_id)
+        assert task_obj is not None
+        runner = TaskStreamRunner(task_obj, task_obj.config)
+        fake_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        runner._store_replay_frame(42, fake_frame)
+        assert runner.get_replay_frame(42) is not None
+
+        replay_res = client.get(f"/api/tasks/{screen_id}/frame/42")
+        assert replay_res.status_code == 200
+        assert int(replay_res.headers.get("x-frame-width", "0")) == 1280
+        assert int(replay_res.headers.get("x-frame-height", "0")) == 720
+    finally:
+        client.delete(f"/api/tasks/{screen_id}")

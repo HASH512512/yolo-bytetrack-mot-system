@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 import threading
 import time
 import cv2
 import numpy as np
 import pytest
+from PIL import Image
 
 from core.byte_tracker import ByteTracker, ByteTrackerConfig
 from core.detector_adapter import Detection, DetectorAdapter, MockDetectorAdapter
@@ -22,6 +24,7 @@ from pipeline.batch_scheduler import (
     AdaptiveKeyframeConfig,
     AdaptiveKeyframeController,
     BatchInferenceScheduler,
+    FrameResult,
 )
 from pipeline.multi_stream import MultiStreamBatchCoordinator, StreamSpec
 from pipeline.rules_engine import (
@@ -32,7 +35,15 @@ from pipeline.rules_engine import (
     LoiteringConfig,
     point_in_polygon,
 )
-from pipeline.video_stream import FramePacket, RingBuffer, VideoStreamReader
+from pipeline.video_stream import (
+    FramePacket,
+    RingBuffer,
+    VideoStreamReader,
+    detect_source_native_fps,
+    is_live_video_source,
+    parse_camera_source,
+    parse_screen_source,
+)
 
 
 def test_ring_buffer_backpressure():
@@ -548,3 +559,236 @@ def test_multi_stream_coordinator_4streams_and_backpressure():
     assert rr_metrics["dropped_frames"] == 8
     assert rr_coord.remove_stream("rr_0") is True
     assert rr_coord.remove_stream("rr_0") is False
+
+
+def test_source_uri_parsers_and_native_fps(monkeypatch):
+    assert parse_screen_source("screen://0") == {
+        "monitor": 0,
+        "x": None,
+        "y": None,
+        "w": None,
+        "h": None,
+    }
+    assert parse_screen_source("screen://1?x=10&y=20&w=1280&h=720") == {
+        "monitor": 1,
+        "x": 10,
+        "y": 20,
+        "w": 1280,
+        "h": 720,
+    }
+    assert parse_screen_source("SCREEN://0?w=320&h=240") == {
+        "monitor": 0,
+        "x": None,
+        "y": None,
+        "w": 320,
+        "h": 240,
+    }
+    assert parse_screen_source("screen://abc") is None
+    assert parse_screen_source("screen://0?w=0&h=240") is None
+    assert parse_screen_source("video.mp4") is None
+
+    assert parse_camera_source(0) == 0
+    assert parse_camera_source("0") == 0
+    assert parse_camera_source("camera://0") == 0
+    assert parse_camera_source("CAMERA://2") == 2
+    assert parse_camera_source(-1) is None
+    assert parse_camera_source(True) is None
+    assert parse_camera_source("camera://abc") is None
+    assert parse_camera_source("demo") is None
+
+    assert is_live_video_source(0) is True
+    assert is_live_video_source("0") is True
+    assert is_live_video_source("camera://0") is True
+    assert is_live_video_source("screen://0?x=0&y=0&w=320&h=240") is True
+    assert is_live_video_source("rtsp://127.0.0.1:8554/cam") is True
+    assert is_live_video_source("rtmp://localhost/live") is True
+    assert is_live_video_source("http://localhost/mjpeg") is True
+    assert is_live_video_source("https://localhost/mjpeg") is True
+    assert is_live_video_source("demo") is False
+    assert is_live_video_source("clip.mp4") is False
+    assert is_live_video_source([]) is False
+
+    # Ensure detect_source_native_fps never calls cv2.VideoCapture for live URIs
+    monkeypatch.setattr(
+        cv2,
+        "VideoCapture",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not open VideoCapture")),
+    )
+    assert detect_source_native_fps("screen://0?x=0&y=0&w=320&h=240") == 60.0
+    assert detect_source_native_fps("camera://0") == 30.0
+    assert detect_source_native_fps(0) == 30.0
+    assert detect_source_native_fps("rtsp://127.0.0.1/stream") == 30.0
+
+
+def test_video_file_looping_and_non_looping(tmp_path: Path):
+    video_path = tmp_path / "loop_test.avi"
+    writer = cv2.VideoWriter(
+        str(video_path),
+        cv2.VideoWriter_fourcc(*"MJPG"),
+        25.0,
+        (96, 64),
+    )
+    assert writer.isOpened()
+    colors = [20, 80, 140, 210]
+    try:
+        for val in colors:
+            writer.write(np.full((64, 96, 3), val, dtype=np.uint8))
+    finally:
+        writer.release()
+
+    # Non-looping stops cleanly at EOF with 4 frames
+    reader_once = VideoStreamReader(
+        source=video_path, buffer_capacity=16, loop_synthetic=False
+    )
+    once_packets = []
+    with reader_once:
+        while True:
+            pkt = reader_once.buffer.get(timeout=0.5)
+            if pkt is not None:
+                once_packets.append(pkt)
+            elif reader_once.is_eof:
+                break
+    assert len(once_packets) == 4
+    assert reader_once.frame_width == 96
+    assert reader_once.frame_height == 64
+
+    # Looping wraps seamlessly past 4 frames
+    reader_loop = VideoStreamReader(
+        source=video_path, buffer_capacity=16, loop_synthetic=True
+    )
+    looped_vals = []
+    with reader_loop:
+        for _ in range(10):
+            pkt = reader_loop.buffer.get(timeout=0.5)
+            assert pkt is not None
+            looped_vals.append(int(np.mean(pkt.frame)))
+    assert len(looped_vals) == 10
+    # Verify wrap-around pattern repeats from pass 1 to pass 2
+    assert np.allclose(looped_vals[0:4], looped_vals[4:8], atol=15)
+    assert np.allclose(looped_vals[0:2], looped_vals[8:10], atol=15)
+
+
+def test_screen_region_capture_mocked(monkeypatch):
+    import PIL.ImageGrab as image_grab
+
+    monkeypatch.setitem(sys.modules, "dxcam", None)
+    monkeypatch.setitem(sys.modules, "mss", None)
+
+    seen_bboxes = []
+
+    def fake_grab(bbox=None, **kwargs):
+        seen_bboxes.append(bbox)
+        # RGB image (width=320, height=240) with R=10, G=20, B=30
+        arr = np.zeros((240, 320, 3), dtype=np.uint8)
+        arr[:, :, 0] = 10
+        arr[:, :, 1] = 20
+        arr[:, :, 2] = 30
+        return Image.fromarray(arr, mode="RGB")
+
+    monkeypatch.setattr(image_grab, "grab", fake_grab)
+
+    reader = VideoStreamReader(
+        source="screen://0?x=0&y=0&w=320&h=240",
+        buffer_capacity=8,
+        target_fps=None,
+    )
+    packets = []
+    with reader:
+        for _ in range(3):
+            pkt = reader.buffer.get(timeout=0.5)
+            assert pkt is not None
+            packets.append(pkt)
+
+    assert len(packets) == 3
+    assert seen_bboxes[0] == (0, 0, 320, 240)
+    assert packets[0].frame.shape == (240, 320, 3)
+    # RGB (10, 20, 30) converted to OpenCV BGR (30, 20, 10)
+    assert tuple(int(v) for v in packets[0].frame[0, 0]) == (30, 20, 10)
+    assert reader.frame_width == 320
+    assert reader.frame_height == 240
+    assert reader.source_fps == 60.0
+
+
+def test_network_stream_reconnect_and_stop(monkeypatch):
+    open_calls = []
+
+    class _FlakyCapture:
+        def __init__(self, idx: int) -> None:
+            self.idx = idx
+            self.reads = 0
+            self.released = False
+
+        def isOpened(self) -> bool:
+            return True
+
+        def get(self, prop_id: int) -> float:
+            if prop_id == cv2.CAP_PROP_FRAME_WIDTH:
+                return 160.0
+            if prop_id == cv2.CAP_PROP_FRAME_HEIGHT:
+                return 90.0
+            if prop_id == cv2.CAP_PROP_FPS:
+                return 25.0
+            return 0.0
+
+        def read(self):
+            self.reads += 1
+            # First capture drops after 1 frame, second capture recovers
+            if self.idx == 0 and self.reads > 1:
+                return False, None
+            return True, np.full((90, 160, 3), self.idx * 50 + self.reads, dtype=np.uint8)
+
+        def release(self) -> None:
+            self.released = True
+
+    def fake_cap(src, *args, **kwargs):
+        cap = _FlakyCapture(len(open_calls))
+        open_calls.append(cap)
+        return cap
+
+    monkeypatch.setattr(cv2, "VideoCapture", fake_cap)
+
+    reader = VideoStreamReader(
+        source="rtsp://127.0.0.1:8554/test",
+        buffer_capacity=16,
+        reconnect_backoff=0.01,
+        max_reconnects=4,
+    )
+    got = []
+    with reader:
+        for _ in range(4):
+            pkt = reader.buffer.get(timeout=1.0)
+            assert pkt is not None
+            got.append(pkt)
+
+    assert len(open_calls) >= 2
+    assert all(c.released for c in open_calls)
+    assert reader.frame_width == 160
+    assert reader.frame_height == 90
+    assert reader.source_fps == 25.0
+
+
+def test_scheduler_exposes_gmc_shift_px():
+    rng = np.random.default_rng(7)
+    base_bg = rng.integers(20, 180, size=(240, 640, 3), dtype=np.uint8)
+    # Shift textured background by +24 px along x between frame 1 and frame 2
+    frame1 = base_bg.copy()
+    frame2 = np.roll(base_bg, shift=24, axis=1)
+
+    detector = MockDetectorAdapter(scripted_detections={0: [], 1: []})
+    tracker = ByteTracker(ByteTrackerConfig(use_gmc=True, gmc_method="phase"))
+    scheduler = BatchInferenceScheduler(
+        detector=detector,
+        tracker=tracker,
+        batch_size=2,
+    )
+    packets = [
+        FramePacket(frame_id=1, timestamp=0.04, frame=frame1),
+        FramePacket(frame_id=2, timestamp=0.08, frame=frame2),
+    ]
+    results = scheduler.process_batch(packets)
+    assert len(results) == 2
+    assert isinstance(results[0], FrameResult)
+    assert results[0].gmc_shift_px == 0.0
+    assert results[1].gmc_shift_px > 10.0
+    assert results[1].gmc_shift_px == pytest.approx(tracker.last_gmc_shift_px)
+    assert scheduler.get_metrics()["gmc_shift_px"] == pytest.approx(tracker.last_gmc_shift_px)

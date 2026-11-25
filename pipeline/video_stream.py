@@ -7,14 +7,90 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import sys
 import threading
 import time
-from typing import Deque, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple, Union
+from urllib.parse import parse_qs, urlparse
 import numpy as np
 
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+_NETWORK_PREFIXES = ("rtsp://", "rtsps://", "rtmp://", "http://", "https://")
 _NATURAL_TOKEN_RE = re.compile(r"(\d+)")
+
+
+def parse_screen_source(uri: Any) -> Optional[Dict[str, Any]]:
+    """Parse 'screen://0' or 'screen://0?x=0&y=0&w=1280&h=720' into a dict, or None."""
+    if not isinstance(uri, str):
+        return None
+    s = uri.strip()
+    if not s.lower().startswith("screen://"):
+        return None
+
+    parsed = urlparse(s)
+    mon_raw = (parsed.netloc or parsed.path.lstrip("/")).strip()
+    if not mon_raw:
+        monitor = 0
+    elif mon_raw.isdigit():
+        monitor = int(mon_raw)
+    else:
+        return None
+
+    qs = parse_qs(parsed.query, keep_blank_values=False)
+
+    def _opt_int(key: str) -> Optional[int]:
+        vals = qs.get(key)
+        if not vals:
+            return None
+        return int(float(vals[0]))
+
+    try:
+        x = _opt_int("x")
+        y = _opt_int("y")
+        w = _opt_int("w")
+        h = _opt_int("h")
+    except (TypeError, ValueError):
+        return None
+
+    if (w is not None and w <= 0) or (h is not None and h <= 0):
+        return None
+
+    return {"monitor": monitor, "x": x, "y": y, "w": w, "h": h}
+
+
+def parse_camera_source(uri: Any) -> Optional[int]:
+    """Parse 'camera://0', '0', or non-negative int 0 into camera index int, or None."""
+    if isinstance(uri, bool):
+        return None
+    if isinstance(uri, int):
+        return uri if uri >= 0 else None
+    if not isinstance(uri, str):
+        return None
+
+    s = uri.strip()
+    if not s:
+        return None
+    if s.isdigit():
+        return int(s)
+    if s.lower().startswith("camera://"):
+        rest = s[9:].split("?", 1)[0].strip().strip("/")
+        if rest.isdigit():
+            return int(rest)
+    return None
+
+
+def _is_network_stream_source(source: Any) -> bool:
+    return isinstance(source, str) and source.strip().lower().startswith(_NETWORK_PREFIXES)
+
+
+def is_live_video_source(source: Any) -> bool:
+    """Return True for webcam, screen:// capture, or rtsp/rtmp/http(s) live streams."""
+    return (
+        parse_camera_source(source) is not None
+        or parse_screen_source(source) is not None
+        or _is_network_stream_source(source)
+    )
 
 
 def _natural_sort_key(path: Path) -> Tuple[Tuple[int, Union[int, str]], ...]:
@@ -65,7 +141,13 @@ def _detect_dir_seqinfo_meta(dir_path: Path) -> Tuple[int, int, float]:
 
 
 def detect_source_native_fps(source: Union[int, str, Path], default_fps: float = 30.0) -> float:
-    """Detect native FPS of an image-sequence directory or OpenCV video file."""
+    """Detect native FPS of screen/camera/stream, image-sequence directory, or video file."""
+    if parse_screen_source(source) is not None:
+        return 60.0
+    if parse_camera_source(source) is not None:
+        return 30.0
+    if _is_network_stream_source(source):
+        return float(default_fps)
     if _is_directory_source(source):
         _, _, fps = _detect_dir_seqinfo_meta(Path(source))  # type: ignore[arg-type]
         return float(fps) if fps > 0.0 else float(default_fps)
@@ -87,6 +169,143 @@ def detect_source_native_fps(source: Union[int, str, Path], default_fps: float =
         except Exception:
             pass
     return float(default_fps)
+
+
+def _create_screen_grabber(
+    screen_cfg: Dict[str, Any],
+) -> Tuple[Callable[[], Optional[np.ndarray]], Callable[[], None]]:
+    """Create fastest available screen capture backend: dxcam -> mss -> PIL.ImageGrab."""
+    monitor = max(0, int(screen_cfg.get("monitor", 0)))
+    rx = screen_cfg.get("x")
+    ry = screen_cfg.get("y")
+    rw = screen_cfg.get("w")
+    rh = screen_cfg.get("h")
+    has_region = rw is not None and rh is not None and int(rw) > 0 and int(rh) > 0
+
+    # 1. Try dxcam (DXGI GPU Desktop Duplication)
+    try:
+        import dxcam  # type: ignore
+
+        cam = None
+        try:
+            cam = dxcam.create(output_idx=monitor, output_color="BGR")
+        except Exception:
+            if monitor != 0:
+                cam = dxcam.create(output_idx=0, output_color="BGR")
+        if cam is not None:
+            region: Optional[Tuple[int, int, int, int]] = None
+            if has_region:
+                cam_w = int(getattr(cam, "width", 0) or 0)
+                cam_h = int(getattr(cam, "height", 0) or 0)
+                left = max(0, int(rx or 0))
+                top = max(0, int(ry or 0))
+                right = left + int(rw)
+                bottom = top + int(rh)
+                if cam_w > 0 and cam_h > 0:
+                    left = min(left, max(0, cam_w - 1))
+                    top = min(top, max(0, cam_h - 1))
+                    right = max(left + 1, min(right, cam_w))
+                    bottom = max(top + 1, min(bottom, cam_h))
+                region = (left, top, right, bottom)
+
+            last_frame: Optional[np.ndarray] = None
+            warmup_frame = None
+            for _ in range(3):
+                warmup_frame = cam.grab(region=region) if region else cam.grab()
+                if warmup_frame is not None:
+                    break
+                time.sleep(0.005)
+            if warmup_frame is not None:
+                last_frame = np.ascontiguousarray(warmup_frame[:, :, :3])
+
+                def _grab_dxcam() -> Optional[np.ndarray]:
+                    nonlocal last_frame
+                    fr = cam.grab(region=region) if region else cam.grab()
+                    if fr is not None:
+                        last_frame = np.ascontiguousarray(fr[:, :, :3])
+                    return last_frame
+
+                def _release_dxcam() -> None:
+                    try:
+                        cam.release()
+                    except Exception:
+                        pass
+
+                return _grab_dxcam, _release_dxcam
+            try:
+                cam.release()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 2. Try mss
+    try:
+        import mss  # type: ignore
+
+        sct = mss.mss()
+        monitors = sct.monitors
+        if len(monitors) > 1:
+            mon_idx = min(monitor, len(monitors) - 2) + 1
+        else:
+            mon_idx = 0
+        base_mon = monitors[mon_idx]
+        if has_region:
+            left = int(base_mon["left"]) + max(0, int(rx or 0))
+            top = int(base_mon["top"]) + max(0, int(ry or 0))
+            max_right = int(base_mon["left"]) + int(base_mon["width"])
+            max_bottom = int(base_mon["top"]) + int(base_mon["height"])
+            left = min(left, max_right - 1)
+            top = min(top, max_bottom - 1)
+            mss_region = {
+                "left": left,
+                "top": top,
+                "width": max(1, min(int(rw), max_right - left)),
+                "height": max(1, min(int(rh), max_bottom - top)),
+            }
+        else:
+            mss_region = base_mon
+
+        def _grab_mss() -> Optional[np.ndarray]:
+            shot = sct.grab(mss_region)
+            arr = np.asarray(shot, dtype=np.uint8)
+            if arr.ndim != 3 or arr.shape[2] < 3:
+                return None
+            return np.ascontiguousarray(arr[:, :, :3])
+
+        def _release_mss() -> None:
+            try:
+                sct.close()
+            except Exception:
+                pass
+
+        return _grab_mss, _release_mss
+    except Exception:
+        pass
+
+    # 3. Fallback to built-in PIL.ImageGrab
+    from PIL import ImageGrab
+
+    bbox: Optional[Tuple[int, int, int, int]] = None
+    if has_region:
+        left = max(0, int(rx or 0)) if monitor == 0 else int(rx or 0)
+        top = max(0, int(ry or 0)) if monitor == 0 else int(ry or 0)
+        bbox = (left, top, left + int(rw), top + int(rh))
+
+    def _grab_pil() -> Optional[np.ndarray]:
+        if monitor > 0:
+            try:
+                img = ImageGrab.grab(bbox=bbox, all_screens=True)
+            except TypeError:
+                img = ImageGrab.grab(bbox=bbox)
+        else:
+            img = ImageGrab.grab(bbox=bbox)
+        arr = np.asarray(img, dtype=np.uint8)
+        if arr.ndim != 3 or arr.shape[2] < 3:
+            return None
+        return np.ascontiguousarray(arr[:, :, :3][:, :, ::-1])
+
+    return _grab_pil, (lambda: None)
 
 
 @dataclass
@@ -226,12 +445,16 @@ class VideoStreamReader:
         target_fps: Optional[float] = None,
         loop_synthetic: bool = False,
         max_cached_frames: int = 300,
+        reconnect_backoff: float = 0.15,
+        max_reconnects: int = 6,
     ) -> None:
         self.source = source
         self.buffer = RingBuffer(capacity=buffer_capacity, drop_policy=drop_policy)
         self.target_fps = float(target_fps) if target_fps is not None and float(target_fps) > 0.0 else None
         self.loop_synthetic = loop_synthetic
         self.max_cached_frames = max(0, int(max_cached_frames))
+        self._reconnect_backoff = max(0.01, float(reconnect_backoff))
+        self._max_reconnects = max(0, int(max_reconnects))
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -248,6 +471,12 @@ class VideoStreamReader:
             if first.ndim >= 2:
                 self._frame_height = int(first.shape[0])
                 self._frame_width = int(first.shape[1])
+            if self._source_fps <= 0.0:
+                self._source_fps = 30.0
+        elif parse_screen_source(source) is not None:
+            if self._source_fps <= 0.0:
+                self._source_fps = 60.0
+        elif parse_camera_source(source) is not None or _is_network_stream_source(source):
             if self._source_fps <= 0.0:
                 self._source_fps = 30.0
         elif _is_directory_source(source):
@@ -379,6 +608,47 @@ class VideoStreamReader:
             self.buffer.close()
             return
 
+        screen_cfg = parse_screen_source(self.source)
+        if screen_cfg is not None:
+            grab_fn = None
+            release_fn = None
+            try:
+                grab_fn, release_fn = _create_screen_grabber(screen_cfg)
+                consecutive_errors = 0
+                while not self._stop_event.is_set():
+                    t0 = time.perf_counter()
+                    try:
+                        frame = grab_fn()
+                    except Exception:
+                        frame = None
+                    decode_ms = (time.perf_counter() - t0) * 1000.0
+                    if frame is None:
+                        consecutive_errors += 1
+                        if consecutive_errors >= 5:
+                            break
+                        self._stop_event.wait(timeout=0.02)
+                        continue
+                    consecutive_errors = 0
+                    self._update_frame_meta(frame=frame, fps=self.target_fps or 60.0)
+                    self._total_frames += 1
+                    self.buffer.put(
+                        FramePacket(
+                            frame_id=self._total_frames,
+                            timestamp=time.perf_counter(),
+                            frame=frame,
+                            decode_ms=decode_ms,
+                        )
+                    )
+                    self._wait_interval(t0, frame_interval)
+            except Exception:
+                pass
+            finally:
+                if release_fn is not None:
+                    release_fn()
+                self._eof = True
+                self.buffer.close()
+            return
+
         import cv2  # lazy import so pure-unit environments stay lightweight
 
         if _is_directory_source(self.source):
@@ -461,27 +731,115 @@ class VideoStreamReader:
             self.buffer.close()
             return
 
+        cam_idx = parse_camera_source(self.source)
+        is_network = _is_network_stream_source(self.source)
+        is_live = (cam_idx is not None) or is_network
         src = str(self.source) if isinstance(self.source, Path) else self.source
-        cap = cv2.VideoCapture(src)
+
+        def _open_capture():
+            if cam_idx is not None:
+                if sys.platform.startswith("win") and hasattr(cv2, "CAP_DSHOW"):
+                    try:
+                        c = cv2.VideoCapture(cam_idx, cv2.CAP_DSHOW)
+                        if c.isOpened():
+                            return c
+                        c.release()
+                    except TypeError:
+                        pass
+                return cv2.VideoCapture(cam_idx)
+            return cv2.VideoCapture(src)
+
+        def _sync_cap_meta(c) -> None:
+            if c is None or not c.isOpened():
+                return
+            cap_w = int(c.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            cap_h = int(c.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            cap_fps = float(c.get(cv2.CAP_PROP_FPS) or 0.0)
+            self._update_frame_meta(
+                width=cap_w,
+                height=cap_h,
+                fps=(
+                    cap_fps
+                    if cap_fps > 0.0 and not np.isnan(cap_fps)
+                    else (self.target_fps or 30.0)
+                ),
+            )
+            if cap_fps > 0.0 and not np.isnan(cap_fps):
+                with self._meta_lock:
+                    self._source_fps = cap_fps
+
+        cap = _open_capture()
+        _sync_cap_meta(cap)
+        read_any = False
+        transient_drops = 0
+        reconnect_attempts = 0
+        backoff = self._reconnect_backoff
         try:
-            if cap.isOpened():
-                cap_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-                cap_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-                cap_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-                self._update_frame_meta(
-                    width=cap_w,
-                    height=cap_h,
-                    fps=(cap_fps if cap_fps > 0.0 and not np.isnan(cap_fps) else (self.target_fps or 30.0)),
-                )
-                if cap_fps > 0.0 and not np.isnan(cap_fps):
-                    with self._meta_lock:
-                        self._source_fps = cap_fps
-            while not self._stop_event.is_set() and cap.isOpened():
+            while not self._stop_event.is_set():
+                if cap is None or not cap.isOpened():
+                    if is_network and reconnect_attempts < self._max_reconnects:
+                        self._stop_event.wait(timeout=backoff)
+                        if self._stop_event.is_set():
+                            break
+                        backoff = min(3.0, backoff * 1.5)
+                        reconnect_attempts += 1
+                        if cap is not None:
+                            cap.release()
+                        cap = _open_capture()
+                        _sync_cap_meta(cap)
+                        continue
+                    break
+
                 t0 = time.perf_counter()
                 ok, frame = cap.read()
                 decode_ms = (time.perf_counter() - t0) * 1000.0
                 if not ok or frame is None:
+                    if is_network:
+                        transient_drops += 1
+                        if transient_drops < 3:
+                            self._stop_event.wait(timeout=0.02)
+                            continue
+                        transient_drops = 0
+                        cap.release()
+                        cap = None
+                        if reconnect_attempts < self._max_reconnects:
+                            self._stop_event.wait(timeout=backoff)
+                            if self._stop_event.is_set():
+                                break
+                            backoff = min(3.0, backoff * 1.5)
+                            reconnect_attempts += 1
+                            cap = _open_capture()
+                            _sync_cap_meta(cap)
+                            continue
+                        break
+                    if cam_idx is not None:
+                        transient_drops += 1
+                        if transient_drops < 5:
+                            self._stop_event.wait(timeout=0.02)
+                            continue
+                        break
+                    if self.loop_synthetic and not is_live and read_any:
+                        rewound = cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        if rewound:
+                            ok, frame = cap.read()
+                        if not rewound or not ok or frame is None:
+                            cap.release()
+                            cap = _open_capture()
+                            if cap is not None and cap.isOpened():
+                                ok, frame = cap.read()
+                        if not ok or frame is None:
+                            break
+                        decode_ms = (time.perf_counter() - t0) * 1000.0
+                    else:
+                        break
+
+                if self._stop_event.is_set():
                     break
+
+                read_any = True
+                transient_drops = 0
+                reconnect_attempts = 0
+                backoff = self._reconnect_backoff
                 self._update_frame_meta(frame=frame, fps=self.target_fps or 30.0)
                 self._total_frames += 1
                 self.buffer.put(
@@ -494,6 +852,7 @@ class VideoStreamReader:
                 )
                 self._wait_interval(t0, frame_interval)
         finally:
-            cap.release()
+            if cap is not None:
+                cap.release()
             self._eof = True
             self.buffer.close()

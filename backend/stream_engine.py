@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
+from collections import OrderedDict, deque
+import json
 import math
 from pathlib import Path
 import queue
+import shutil
 import threading
 import time
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple, Union
@@ -45,6 +47,11 @@ from pipeline.rules_engine import CampusRoadRulesEngine
 from pipeline.video_stream import VideoStreamReader, detect_source_native_fps
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MAX_MEMORY_REPLAY_FRAMES = 600
+
+
+def _replay_cache_root() -> Path:
+    return PROJECT_ROOT / "data" / "replay_cache"
 
 _DEMO_CACHE_LOCK = threading.Lock()
 _DEMO_FRAMES_CACHE: Optional[Tuple[List[np.ndarray], Dict[int, List[Detection]]]] = None
@@ -135,7 +142,6 @@ def _get_demo_scenario_assets(
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness=-1)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (245, 245, 245), thickness=2)
                 if det.cls_id == 2:
-                    # Sedan windshield accent
                     wx1 = x1 + max(6, (x2 - x1) // 4)
                     wx2 = x2 - max(6, (x2 - x1) // 5)
                     wy1 = y1 + 6
@@ -161,11 +167,67 @@ def _get_demo_scenario_assets(
 def _resolve_local_path(raw_path: str) -> Path:
     """Resolve an absolute or project-relative local filesystem path."""
     p = Path(raw_path)
-    if not p.is_absolute() and not p.exists():
-        candidate = PROJECT_ROOT / p
-        if candidate.exists():
-            return candidate
-    return p
+    if p.is_absolute():
+        return p
+    candidate = PROJECT_ROOT / p
+    if candidate.exists():
+        return candidate
+    if p.exists():
+        return p
+    return candidate
+
+
+def _encode_replay_jpeg(
+    frame: np.ndarray, max_width: int = 1280, quality: int = 85
+) -> Optional[Tuple[bytes, int, int]]:
+    """Encode frame to max-1280px JPEG while preserving original (width, height)."""
+    orig_h, orig_w = int(frame.shape[0]), int(frame.shape[1])
+    if orig_w > max_width:
+        scale = float(max_width) / float(orig_w)
+        out_img = cv2.resize(
+            frame,
+            (max_width, max(1, int(round(orig_h * scale)))),
+            interpolation=cv2.INTER_LINEAR,
+        )
+    else:
+        out_img = frame
+    ok, buf = cv2.imencode(".jpg", out_img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    if not ok:
+        return None
+    return buf.tobytes(), orig_w, orig_h
+
+
+def read_replay_cache_frame(
+    task_id: int, frame_id: int
+) -> Optional[Tuple[bytes, int, int]]:
+    """Read a persisted replay JPEG snapshot and original dimensions from disk."""
+    cache_dir = _replay_cache_root() / f"task_{int(task_id)}"
+    jpg_path = cache_dir / f"{int(frame_id)}.jpg"
+    if not jpg_path.is_file():
+        return None
+    try:
+        jpg_bytes = jpg_path.read_bytes()
+    except OSError:
+        return None
+
+    orig_w, orig_h = 0, 0
+    meta_path = cache_dir / "meta.json"
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            orig_w = int(meta.get("width", 0))
+            orig_h = int(meta.get("height", 0))
+        except Exception:
+            orig_w, orig_h = 0, 0
+
+    if orig_w <= 0 or orig_h <= 0:
+        arr = np.frombuffer(jpg_bytes, dtype=np.uint8)
+        decoded = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if decoded is not None:
+            orig_h, orig_w = int(decoded.shape[0]), int(decoded.shape[1])
+        else:
+            orig_w, orig_h = 1280, 720
+    return jpg_bytes, orig_w, orig_h
 
 
 class TaskStreamRunner:
@@ -189,6 +251,11 @@ class TaskStreamRunner:
         self._latest_raw_frame: Optional[np.ndarray] = None
         self._jpeg_event = threading.Event()
         self._jpeg_thread: Optional[threading.Thread] = None
+
+        self._replay_lock = threading.Lock()
+        self._replay_cache: OrderedDict[int, Tuple[bytes, int, int]] = OrderedDict()
+        self._replay_cache_dir = _replay_cache_root() / f"task_{self.task_id}"
+        self._replay_meta_dims: Optional[Tuple[int, int]] = None
 
         self._db_queue: queue.Queue = queue.Queue(maxsize=256)
         self._db_thread: Optional[threading.Thread] = None
@@ -238,23 +305,67 @@ class TaskStreamRunner:
     def unsubscribe(self, q: asyncio.Queue) -> None:
         self.subscribers.discard(q)
 
+    def get_replay_frame(self, frame_id: int) -> Optional[Tuple[bytes, int, int]]:
+        """Retrieve a cached historical replay frame from memory LRU or disk cache."""
+        fid = int(frame_id)
+        with self._replay_lock:
+            cached = self._replay_cache.get(fid)
+            if cached is not None:
+                self._replay_cache.move_to_end(fid)
+                return cached
+        return read_replay_cache_frame(self.task_id, fid)
+
+    def _store_replay_frame(self, frame_id: int, frame: np.ndarray) -> None:
+        encoded = _encode_replay_jpeg(frame, max_width=1280, quality=85)
+        if encoded is None:
+            return
+        jpg_bytes, orig_w, orig_h = encoded
+        fid = int(frame_id)
+
+        with self._replay_lock:
+            self._replay_cache[fid] = (jpg_bytes, orig_w, orig_h)
+            self._replay_cache.move_to_end(fid)
+            while len(self._replay_cache) > MAX_MEMORY_REPLAY_FRAMES:
+                self._replay_cache.popitem(last=False)
+
+        try:
+            self._replay_cache_dir.mkdir(parents=True, exist_ok=True)
+            (self._replay_cache_dir / f"{fid}.jpg").write_bytes(jpg_bytes)
+            if self._replay_meta_dims != (orig_w, orig_h):
+                (self._replay_cache_dir / "meta.json").write_text(
+                    json.dumps({"width": orig_w, "height": orig_h}),
+                    encoding="utf-8",
+                )
+                self._replay_meta_dims = (orig_w, orig_h)
+        except OSError:
+            pass
+
     def _build_pipeline(self) -> None:
         raw_source = (self.task.video_source or self.config.video_source or "").strip()
+        lower_source = raw_source.lower()
         is_demo = (
-            raw_source.lower() == "demo"
+            lower_source == "demo"
             or self.config.detector_type == DetectorType.MOCK
         )
         self.is_demo_simulation = is_demo
 
-        tracker_cfg = ByteTrackerConfig(
-            use_nsa=self.config.use_nsa,
-            use_diou=self.config.use_diou,
-            use_recovery_pool=self.config.use_recovery_pool,
-            use_class_aware=self.config.use_class_aware,
-            use_vdc=self.config.use_vdc,
-            use_oru=self.config.use_oru,
-            use_lazy_appearance=self.config.use_lazy_appearance,
-        )
+        tracker_kwargs: Dict[str, Any] = {
+            "use_nsa": self.config.use_nsa,
+            "use_diou": self.config.use_diou,
+            "use_recovery_pool": self.config.use_recovery_pool,
+            "use_class_aware": self.config.use_class_aware,
+            "use_vdc": self.config.use_vdc,
+            "use_oru": self.config.use_oru,
+            "use_lazy_appearance": self.config.use_lazy_appearance,
+        }
+        cfg_fields = getattr(ByteTrackerConfig, "__dataclass_fields__", {})
+        if "use_gmc" in cfg_fields:
+            tracker_kwargs["use_gmc"] = bool(getattr(self.config, "use_gmc", False))
+        if "gmc_method" in cfg_fields:
+            tracker_kwargs["gmc_method"] = str(
+                getattr(self.config, "gmc_method", "sparse_optflow") or "sparse_optflow"
+            )
+        tracker_cfg = ByteTrackerConfig(**tracker_kwargs)
         self.tracker = ByteTracker(tracker_cfg)
 
         zones = db.list_zones(self.task_id)
@@ -292,9 +403,17 @@ class TaskStreamRunner:
         else:
             if not raw_source:
                 raise FileNotFoundError("Video source cannot be empty.")
+
+            is_screen = lower_source.startswith("screen://")
+            is_camera = raw_source.isdigit() or lower_source.startswith("camera://")
+            is_net_stream = lower_source.startswith(
+                ("rtsp://", "rtsps://", "rtmp://", "http://", "https://")
+            )
+            is_live_stream = is_screen or is_camera or is_net_stream
+
             if raw_source.isdigit():
                 resolved_source: Union[int, str] = int(raw_source)
-            elif raw_source.lower().startswith(("rtsp://", "rtsps://", "http://", "https://")):
+            elif is_screen or lower_source.startswith("camera://") or is_net_stream:
                 resolved_source = raw_source
             else:
                 src_path = _resolve_local_path(raw_source)
@@ -321,19 +440,30 @@ class TaskStreamRunner:
                 imgsz=self.config.imgsz,
                 lazy_load=False,
             )
-            is_seq_dir = (
-                isinstance(resolved_source, str)
-                and "://" not in resolved_source
-                and Path(resolved_source).is_dir()
-            )
-            is_live_stream = isinstance(resolved_source, int) or (
-                isinstance(resolved_source, str)
-                and resolved_source.lower().startswith(("rtsp://", "rtsps://", "http://", "https://"))
-            )
-            if playback_mode == "native" and not is_live_stream:
-                target_fps: Optional[float] = detect_source_native_fps(resolved_source, default_fps=30.0)
-                batch_size = 1
-                batch_timeout = 0.002
+
+            if playback_mode == "native":
+                if not is_live_stream:
+                    target_fps: Optional[float] = detect_source_native_fps(
+                        resolved_source, default_fps=30.0
+                    )
+                    batch_size = 1
+                    batch_timeout = 0.002
+                elif is_screen:
+                    target_fps = (
+                        float(self.config.fps)
+                        if self.config.fps and float(self.config.fps) > 0.0
+                        else detect_source_native_fps(resolved_source, default_fps=30.0)
+                    )
+                    batch_size = 1
+                    batch_timeout = 0.002
+                else:
+                    target_fps = (
+                        float(self.config.fps)
+                        if self.config.fps and float(self.config.fps) > 0.0
+                        else None
+                    )
+                    batch_size = max(1, int(getattr(self.config, "batch_size", 8)))
+                    batch_timeout = 0.004
             else:
                 target_fps = (
                     float(self.config.fps)
@@ -348,7 +478,7 @@ class TaskStreamRunner:
                 buffer_capacity=64,
                 drop_policy="oldest" if is_live_stream else "block",
                 target_fps=target_fps,
-                loop_synthetic=is_seq_dir,
+                loop_synthetic=(not is_live_stream),
             )
 
         enable_roi = bool(getattr(self.config, "enable_roi_rules", False))
@@ -380,6 +510,10 @@ class TaskStreamRunner:
         self._downsample_interval = 1.0 / max(1.0, float(self.config.downsample_fps))
         with self._raw_frame_lock:
             self._latest_raw_frame = None
+        with self._replay_lock:
+            self._replay_cache.clear()
+            self._replay_meta_dims = None
+        shutil.rmtree(self._replay_cache_dir, ignore_errors=True)
         self._jpeg_event.clear()
         while not self._db_queue.empty():
             try:
@@ -421,11 +555,11 @@ class TaskStreamRunner:
         self._jpeg_thread = None
 
         try:
-            self._db_queue.put_nowait(None)
+            self._db_queue.put(None, timeout=1.0)
         except queue.Full:
             pass
         if self._db_thread is not None and self._db_thread.is_alive():
-            self._db_thread.join(timeout=2.0)
+            self._db_thread.join(timeout=3.0)
         self._db_thread = None
         self.scheduler = None
         self.reader = None
@@ -538,7 +672,7 @@ class TaskStreamRunner:
         return round(smoothed, 1), [round(vx_px, 1), round(vy_px, 1)]
 
     def _jpeg_worker_loop(self) -> None:
-        """Encode preview JPEG off the inference thread at ~15 Hz."""
+        """Encode preview JPEG off the inference thread at ~15-30 Hz."""
         while not self._stop_event.is_set():
             self._jpeg_event.wait(timeout=0.1)
             self._jpeg_event.clear()
@@ -556,27 +690,18 @@ class TaskStreamRunner:
                 continue
 
             self._last_jpeg_time = now_perf
-            h, w = frame.shape[:2]
-            if w > 1280:
-                scale = 1280.0 / float(w)
-                img = cv2.resize(
-                    frame,
-                    (1280, max(1, int(round(h * scale)))),
-                    interpolation=cv2.INTER_LINEAR,
-                )
-            else:
-                img = frame
-            ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 78])
-            if ok:
+            encoded = _encode_replay_jpeg(frame, max_width=1280, quality=78)
+            if encoded is not None:
+                jpg_bytes, _, _ = encoded
                 with self._jpeg_lock:
-                    self.latest_jpeg = buf.tobytes()
+                    self.latest_jpeg = jpg_bytes
                     self._jpeg_seq += 1
 
     def _db_worker_loop(self) -> None:
-        """Drain trajectory batch inserts off the inference callback thread."""
+        """Drain trajectory batch inserts and replay frame cache writes off the inference thread."""
         while True:
             try:
-                item = self._db_queue.get(timeout=0.2)
+                item = self._db_queue.get(timeout=0.1)
             except queue.Empty:
                 if self._stop_event.is_set():
                     break
@@ -584,9 +709,11 @@ class TaskStreamRunner:
             if item is None:
                 break
             try:
-                frame_id, now_ts, track_items = item
+                frame_id, now_ts, track_items, replay_frame = item
                 if track_items:
                     db.insert_trajectories_batch(self.task_id, frame_id, now_ts, track_items)
+                if replay_frame is not None:
+                    self._store_replay_frame(frame_id, replay_frame)
             except Exception:
                 pass
 
@@ -629,6 +756,16 @@ class TaskStreamRunner:
             )
         )
         detect_skip_ratio = float(sched_metrics.get("detect_skip_ratio", 0.0))
+        gmc_shift_px = float(
+            getattr(
+                result,
+                "gmc_shift_px",
+                sched_metrics.get(
+                    "gmc_shift_px",
+                    getattr(self.tracker, "last_gmc_shift_px", 0.0),
+                ),
+            )
+        )
 
         current_metrics = SystemMetrics(
             fps=round(fps, 1),
@@ -637,6 +774,7 @@ class TaskStreamRunner:
             drop_count=drop_count,
             queue_size=len(self.subscribers),
             detect_skip_ratio=round(detect_skip_ratio, 4),
+            gmc_shift_px=round(gmc_shift_px, 2),
             is_demo_simulation=self.is_demo_simulation,
             active_streams=1,
             stage_latency=PerStageLatency(
@@ -727,10 +865,13 @@ class TaskStreamRunner:
                         db.insert_trajectories_batch(
                             self.task_id, int(result.frame_id), now_ts, track_items
                         )
+                        if result.frame is not None:
+                            self._store_replay_frame(int(result.frame_id), result.frame)
                     else:
+                        replay_copy = result.frame.copy() if result.frame is not None else None
                         try:
                             self._db_queue.put_nowait(
-                                (int(result.frame_id), now_ts, track_items)
+                                (int(result.frame_id), now_ts, track_items, replay_copy)
                             )
                         except queue.Full:
                             pass
@@ -810,6 +951,7 @@ class StreamEngineManager:
                 drop_count=0,
                 queue_size=0,
                 detect_skip_ratio=0.0,
+                gmc_shift_px=0.0,
                 is_demo_simulation=False,
                 active_streams=0,
                 stage_latency=PerStageLatency(),
@@ -821,6 +963,7 @@ class StreamEngineManager:
         total_drops = sum(r.metrics.drop_count for r in active)
         total_q = sum(len(r.subscribers) for r in active)
         avg_skip = sum(r.metrics.detect_skip_ratio for r in active) / len(active)
+        avg_gmc = sum(r.metrics.gmc_shift_px for r in active) / len(active)
         any_demo = any(r.is_demo_simulation for r in active)
         first_stage = active[0].metrics.stage_latency
 
@@ -831,6 +974,7 @@ class StreamEngineManager:
             drop_count=total_drops,
             queue_size=total_q,
             detect_skip_ratio=round(avg_skip, 4),
+            gmc_shift_px=round(avg_gmc, 2),
             is_demo_simulation=any_demo,
             active_streams=len(active),
             stage_latency=first_stage,

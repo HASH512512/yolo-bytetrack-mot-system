@@ -17,6 +17,7 @@ from core.detector_adapter import (
     letterbox,
     nms_boxes,
 )
+from core.gmc import GlobalMotionCompensator, warp_kalman_state
 from core.kalman_filter import KalmanFilter, NSAKalmanFilter
 from core.matching import (
     appearance_cosine_distance,
@@ -24,9 +25,11 @@ from core.matching import (
     bbox_iou_matrix,
     class_penalty_matrix,
     extract_hsv_histogram,
+    extract_hsv_histogram_from_hsv,
     fuse_score,
     iou_distance,
     linear_assignment,
+    prepare_downsampled_hsv,
     velocity_direction_cost,
 )
 from core.trajectory_pool import STrack, TrackState, TrajectoryPool
@@ -48,6 +51,8 @@ __all__ = [
     "gpu_letterbox_batch",
     "letterbox",
     "nms_boxes",
+    "GlobalMotionCompensator",
+    "warp_kalman_state",
     "KalmanFilter",
     "NSAKalmanFilter",
     "appearance_cosine_distance",
@@ -55,9 +60,11 @@ __all__ = [
     "bbox_iou_matrix",
     "class_penalty_matrix",
     "extract_hsv_histogram",
+    "extract_hsv_histogram_from_hsv",
     "fuse_score",
     "iou_distance",
     "linear_assignment",
+    "prepare_downsampled_hsv",
     "velocity_direction_cost",
     "STrack",
     "TrackState",

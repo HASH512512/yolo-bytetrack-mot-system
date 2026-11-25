@@ -1,101 +1,102 @@
 <template>
-  <div class="space-y-4">
-    <!-- Top Query & Filter Bar -->
-    <div class="card space-y-3">
-      <div class="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h2 class="text-base font-bold text-slate-100 flex items-center gap-2">
-            <span>&#x1F50D;</span>
-            <span>历史轨迹检索与 2D 时空回放</span>
-          </h2>
-          <p class="text-xs text-slate-400 mt-0.5">
-            <span>基于 SQLite WAL 复合索引检索持久化目标轨迹，支持按任务、Track ID 与目标类别过滤回放。</span>
-          </p>
+  <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+    <!-- Left Column: Filter Controls + Track Summary List (4 cols) -->
+    <div class="lg:col-span-4 space-y-4">
+      <div class="card space-y-3">
+        <div class="flex items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
+          <div>
+            <h2 class="text-base font-bold text-slate-100 flex items-center gap-1.5">
+              <span>&#x1F50D;</span>
+              <span>历史轨迹检索</span>
+            </h2>
+            <p class="text-[11px] text-slate-400 mt-0.5">
+              <span>SQLite WAL 复合索引按任务 / ID / 类别过滤</span>
+            </p>
+          </div>
+          <span class="badge badge-blue text-[11px]">
+            <span>{{ displaySummaries.length }} 条轨迹</span>
+          </span>
         </div>
-        <span class="badge badge-blue text-xs">
-          <span>{{ displaySummaries.length }} 条轨迹摘要 &middot; {{ replayPoints.length }} 个轨迹点</span>
-        </span>
+
+        <form @submit.prevent="handleQuery" class="space-y-2.5 text-xs">
+          <div>
+            <label class="block text-slate-400 mb-1">监控任务 (Task)</label>
+            <select
+              v-model.number="selectedTaskId"
+              class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
+            >
+              <option :value="0" disabled>-- 请选择任务 --</option>
+              <option v-for="t in store.tasks" :key="t.id" :value="t.id">
+                #{{ t.id }} {{ t.name }} ({{ t.status }})
+              </option>
+            </select>
+          </div>
+
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="block text-slate-400 mb-1">Track ID (可选)</label>
+              <input
+                v-model="trackIdInput"
+                type="number"
+                min="1"
+                placeholder="全部 ID (All)"
+                class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+
+            <div>
+              <label class="block text-slate-400 mb-1">目标类别 (Class)</label>
+              <select
+                v-model="classFilter"
+                class="w-full bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
+              >
+                <option value="all">全部类别 (all)</option>
+                <option value="car">汽车 (car)</option>
+                <option value="person">行人 (person)</option>
+                <option value="motorcycle">摩托车 (motorcycle)</option>
+                <option value="bicycle">自行车 (bicycle)</option>
+                <option value="vehicle">车辆 (vehicle)</option>
+                <option value="pedestrian">行人 (pedestrian)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-2 pt-1">
+            <button
+              type="submit"
+              :disabled="!selectedTaskId || store.tracksLoading"
+              class="btn btn-primary text-xs py-2 px-3 flex-1"
+            >
+              <span>{{ store.tracksLoading ? '检索中...' : '\u{1F50D} 查询轨迹' }}</span>
+            </button>
+            <button
+              type="button"
+              @click="handleResetFilters"
+              :disabled="!selectedTaskId || store.tracksLoading"
+              class="btn btn-secondary text-xs py-2 px-3"
+            >
+              <span>重置</span>
+            </button>
+          </div>
+        </form>
       </div>
 
-      <form @submit.prevent="handleQuery" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3 text-xs pt-1">
-        <div class="lg:col-span-4">
-          <label class="block text-slate-400 mb-1">监控任务 (Task)</label>
-          <select
-            v-model.number="selectedTaskId"
-            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
-          >
-            <option :value="0" disabled>-- 请选择任务 --</option>
-            <option v-for="t in store.tasks" :key="t.id" :value="t.id">
-              #{{ t.id }} {{ t.name }} ({{ t.status }})
-            </option>
-          </select>
-        </div>
-
-        <div class="lg:col-span-2">
-          <label class="block text-slate-400 mb-1">Track ID (可选)</label>
-          <input
-            v-model="trackIdInput"
-            type="number"
-            min="1"
-            placeholder="全部 ID (All)"
-            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
-          />
-        </div>
-
-        <div class="lg:col-span-3">
-          <label class="block text-slate-400 mb-1">目标类别 (Class)</label>
-          <select
-            v-model="classFilter"
-            class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
-          >
-            <option value="all">全部类别 (all)</option>
-            <option value="car">汽车 (car)</option>
-            <option value="person">行人 (person)</option>
-            <option value="motorcycle">摩托车/电动车 (motorcycle)</option>
-            <option value="bicycle">自行车 (bicycle)</option>
-            <option value="vehicle">车辆 (vehicle)</option>
-            <option value="pedestrian">行人 (pedestrian)</option>
-          </select>
-        </div>
-
-        <div class="lg:col-span-3 flex items-end gap-2">
-          <button
-            type="submit"
-            :disabled="!selectedTaskId || store.tracksLoading"
-            class="btn btn-primary text-xs py-2 px-4 flex-1"
-          >
-            <span>{{ store.tracksLoading ? '检索中...' : '\u{1F50D} 查询轨迹' }}</span>
-          </button>
-          <button
-            type="button"
-            @click="handleResetFilters"
-            :disabled="!selectedTaskId || store.tracksLoading"
-            class="btn btn-secondary text-xs py-2 px-3"
-          >
-            <span>重置</span>
-          </button>
-        </div>
-      </form>
-    </div>
-
-    <!-- Main Two-Column Content -->
-    <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
-      <!-- Left Column: Track Summary Cards (4 cols) -->
-      <div class="lg:col-span-4 card space-y-3 flex flex-col">
+      <!-- Track Summary List -->
+      <div class="card space-y-2.5">
         <div class="flex items-center justify-between border-b border-slate-800 pb-2">
           <span class="text-sm font-bold text-slate-100">轨迹摘要列表</span>
-          <span class="text-[11px] text-slate-400">点击卡片加载并回放</span>
+          <span class="text-[11px] text-slate-400">点击卡片回放单目标</span>
         </div>
 
-        <div class="space-y-2 max-h-[680px] overflow-y-auto pr-1 flex-1">
+        <div class="space-y-2 max-h-[540px] overflow-y-auto pr-1">
           <div
             v-for="summary in displaySummaries"
             :key="summary.track_id"
             @click="selectTrackSummary(summary)"
-            class="p-3 rounded-lg border transition-all cursor-pointer space-y-2"
+            class="p-3 rounded-lg border transition-all cursor-pointer space-y-1.5"
             :class="
               selectedTrackId === summary.track_id
-                ? 'bg-indigo-950/40 border-indigo-500 shadow-md shadow-indigo-500/10'
+                ? 'bg-indigo-950/45 border-indigo-500 shadow-md shadow-indigo-500/10'
                 : 'bg-slate-800/40 border-slate-700/60 hover:bg-slate-800/80'
             "
           >
@@ -104,10 +105,7 @@
                 <span class="font-mono font-bold text-sm text-cyan-300">Track #{{ summary.track_id }}</span>
                 <span class="badge badge-blue text-[10px]">{{ summary.class_name }}</span>
               </div>
-              <span
-                v-if="summary.violation_count > 0"
-                class="badge badge-red text-[10px]"
-              >
+              <span v-if="summary.violation_count > 0" class="badge badge-red text-[10px]">
                 <span>&#x1F6A8; {{ summary.violation_count }} 次违章</span>
               </span>
               <span v-else class="badge badge-gray text-[10px]">
@@ -116,8 +114,8 @@
             </div>
 
             <div class="grid grid-cols-2 gap-1 text-[11px] text-slate-300">
-              <span>帧范围: F{{ summary.first_frame }} &rarr; F{{ summary.last_frame }}</span>
-              <span class="text-right">点位数: {{ summary.point_count }} 点</span>
+              <span>帧: F{{ summary.first_frame }} &rarr; F{{ summary.last_frame }}</span>
+              <span class="text-right">点数: {{ summary.point_count }} 点</span>
               <span>均速: {{ summary.avg_speed.toFixed(1) }} km/h</span>
               <span class="text-right text-amber-300">峰值: {{ summary.max_speed.toFixed(1) }} km/h</span>
             </div>
@@ -130,51 +128,70 @@
 
           <div
             v-if="displaySummaries.length === 0"
-            class="text-center py-12 text-slate-500 text-xs space-y-2"
+            class="text-center py-10 text-slate-500 text-xs space-y-1.5"
           >
             <div class="text-2xl">&#x1F4ED;</div>
             <div>暂无持久化轨迹记录</div>
             <div class="text-[11px] text-slate-600">
-              <span>请先在「实时监控」中启动任务运行数秒以写入轨迹数据</span>
+              <span>请先在「实时监控」开启任务运行数秒后再检索</span>
             </div>
           </div>
         </div>
       </div>
+    </div>
 
-      <!-- Right Column: 2D Trajectory Replay Canvas + Points Table (8 cols) -->
-      <div class="lg:col-span-8 space-y-4">
-        <!-- Interactive 2D Replay Canvas -->
-        <div class="card space-y-3 bg-slate-950/90">
-          <div class="flex flex-wrap items-center justify-between gap-2">
-            <div class="flex items-center gap-2">
-              <span class="text-sm font-bold text-slate-100">2D 轨迹时空回放画布</span>
-              <span v-if="isSingleTrackMode && activeTrackDisplayId !== null" class="badge badge-green text-[11px]">
-                <span>正在回放 Track #{{ activeTrackDisplayId }}</span>
-              </span>
-              <span v-else-if="replayPoints.length > 0" class="badge badge-amber text-[11px]">
-                <span>多目标点位预览 (点击左侧卡片可单目标连线回放)</span>
-              </span>
-              <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer ml-2">
-                <input type="checkbox" v-model="showReplayZones" class="accent-indigo-500 rounded" />
-                <span>叠加ROI区</span>
-              </label>
-            </div>
-
-            <div v-if="currentPoint" class="flex flex-wrap items-center gap-3 text-xs font-mono text-slate-300">
-              <span>Frame #{{ currentPoint.frame_id }}</span>
-              <span class="text-cyan-300">
-                ({{ currentPoint.cx.toFixed(0) }}, {{ currentPoint.cy.toFixed(0) }})
-              </span>
-              <span class="text-amber-300">{{ currentPoint.speed.toFixed(1) }} km/h</span>
-              <span class="text-emerald-300">{{ (currentPoint.confidence * 100).toFixed(0) }}%</span>
-            </div>
+    <!-- Right Column: Aligned Replay Stage + Points Table (8 cols) -->
+    <div class="lg:col-span-8 space-y-4">
+      <div class="card space-y-3 bg-slate-950/90">
+        <!-- Replay Header & Telemetry -->
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-sm font-bold text-slate-100">2D 轨迹时空回放舞台</span>
+            <span v-if="isSingleTrackMode && activeTrackDisplayId !== null" class="badge badge-green text-[11px]">
+              <span>正在回放 Track #{{ activeTrackDisplayId }}</span>
+            </span>
+            <span v-else-if="replayPoints.length > 0" class="badge badge-amber text-[11px]">
+              <span>多目标预览 (点击左侧卡片单目标连线回放)</span>
+            </span>
+            <span class="badge badge-gray text-[10px] font-mono">
+              <span>{{ frameDims.width }} &times; {{ frameDims.height }}</span>
+            </span>
+            <label class="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer ml-1">
+              <input type="checkbox" v-model="showReplayZones" class="accent-indigo-500 rounded" />
+              <span>叠加ROI区</span>
+            </label>
           </div>
 
-          <!-- Video Frame Underlay + Interactive Vector Canvas Overlay -->
-          <div class="relative w-full aspect-video rounded-lg overflow-hidden border border-slate-800 bg-slate-950 flex items-center justify-center">
+          <div v-if="currentPoint" class="flex flex-wrap items-center gap-3 text-xs font-mono text-slate-300">
+            <span>F{{ currentPoint.frame_id }}</span>
+            <span class="text-cyan-300">({{ currentPoint.cx.toFixed(0) }}, {{ currentPoint.cy.toFixed(0) }})</span>
+            <span class="text-amber-300">{{ currentPoint.speed.toFixed(1) }} km/h</span>
+            <span class="text-emerald-300">{{ (currentPoint.confidence * 100).toFixed(0) }}%</span>
+          </div>
+        </div>
+
+        <!-- Empty / Missing Frame Status Banner -->
+        <div
+          v-if="replayPoints.length === 0"
+          class="px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-400 flex items-center gap-2"
+        >
+          <span>&#x2139;&#xFE0F;</span>
+          <span>当前暂无回放点位数据，请在左侧选择任务并点击「查询轨迹」或点击轨迹摘要卡片。</span>
+        </div>
+        <div
+          v-else-if="frameStatus === 'missing'"
+          class="px-3 py-2 rounded-lg bg-amber-950/40 border border-amber-800/60 text-xs text-amber-200 flex items-center gap-2"
+        >
+          <span>&#x26A0;&#xFE0F;</span>
+          <span>当前帧图像未命中回放缓存或已不可寻址，已自动切换至纯矢量轨迹网格回放模式。</span>
+        </div>
+
+        <!-- Exact Aspect-Ratio Stage Container (Zero Letterbox Offset) -->
+        <div class="w-full rounded-lg border border-slate-800 bg-slate-950 p-2 flex items-center justify-center min-h-[260px]">
+          <div class="relative overflow-hidden rounded" :style="stageBoxStyle">
             <img
-              v-if="currentFrameUrl && !replayImgErrored"
-              :src="currentFrameUrl"
+              v-if="frameBlobUrl && frameStatus === 'loaded'"
+              :src="frameBlobUrl"
               alt="Historical Replay Video Frame"
               class="w-full h-full object-contain block select-none"
               @load="onReplayImgLoad"
@@ -182,108 +199,128 @@
             />
             <canvas
               ref="replayCanvasRef"
-              :width="canvasDims.width"
-              :height="canvasDims.height"
-              class="absolute inset-0 w-full h-full object-contain pointer-events-none block"
+              :width="frameDims.width"
+              :height="frameDims.height"
+              class="absolute inset-0 w-full h-full pointer-events-none block"
             ></canvas>
-          </div>
-
-          <!-- Scrubber & Playback Controls -->
-          <div class="flex flex-wrap items-center gap-3 pt-1">
-            <div class="flex items-center gap-1.5">
-              <button
-                @click="togglePlay"
-                :disabled="replayPoints.length === 0"
-                class="btn btn-primary text-xs py-1.5 px-3"
-              >
-                <span>{{ isPlaying ? '\u23F8 暂停' : '\u25B6 播放' }}</span>
-              </button>
-              <button
-                @click="resetReplay"
-                :disabled="replayPoints.length === 0"
-                class="btn btn-secondary text-xs py-1.5 px-2.5"
-              >
-                <span>&#x23EE; 重置</span>
-              </button>
-              <select
-                v-model.number="playbackSpeed"
-                class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
-              >
-                <option :value="1">1x</option>
-                <option :value="2">2x</option>
-                <option :value="4">4x</option>
-              </select>
-            </div>
-
-            <div class="flex-1 flex items-center gap-3 min-w-[200px]">
-              <input
-                type="range"
-                min="0"
-                :max="Math.max(0, replayPoints.length - 1)"
-                v-model.number="replayIndex"
-                @input="pauseReplay"
-                :disabled="replayPoints.length === 0"
-                class="flex-1 accent-indigo-500 cursor-pointer"
-              />
-              <span class="text-xs font-mono text-slate-400 whitespace-nowrap">
-                {{ replayPoints.length > 0 ? replayIndex + 1 : 0 }} / {{ replayPoints.length }}
-              </span>
-            </div>
           </div>
         </div>
 
-        <!-- Tabular Trajectory Points List -->
-        <div class="card space-y-2">
-          <div class="flex items-center justify-between">
-            <span class="text-sm font-bold text-slate-100">轨迹点位明细表</span>
-            <span class="text-[11px] text-slate-400">点击任意行跳转至对应帧位</span>
+        <!-- Replay Playback Controls (Play/Pause/Prev/Next/FPS + Scrubber) -->
+        <div class="flex flex-wrap items-center gap-2.5 pt-1">
+          <div class="flex flex-wrap items-center gap-1.5">
+            <button
+              @click="stepPrev"
+              :disabled="replayPoints.length === 0 || replayIndex <= 0"
+              class="btn btn-secondary text-xs py-1.5 px-2.5"
+              title="上一帧 (Prev)"
+            >
+              <span>&#x23EE; 上一帧</span>
+            </button>
+            <button
+              @click="togglePlay"
+              :disabled="replayPoints.length <= 1"
+              class="btn btn-primary text-xs py-1.5 px-3"
+            >
+              <span>{{ isPlaying ? '\u23F8 暂停' : '\u25B6 播放' }}</span>
+            </button>
+            <button
+              @click="stepNext"
+              :disabled="replayPoints.length === 0 || replayIndex >= replayPoints.length - 1"
+              class="btn btn-secondary text-xs py-1.5 px-2.5"
+              title="下一帧 (Next)"
+            >
+              <span>下一帧 &#x23ED;</span>
+            </button>
+            <button
+              @click="resetReplay"
+              :disabled="replayPoints.length === 0"
+              class="btn btn-secondary text-xs py-1.5 px-2.5"
+              title="重置到起点 (Reset)"
+            >
+              <span>&#x21BA; 重置</span>
+            </button>
+            <select
+              v-model.number="replayFps"
+              class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+              title="回放速率 (FPS)"
+            >
+              <option :value="5">5 FPS</option>
+              <option :value="10">10 FPS</option>
+              <option :value="15">15 FPS</option>
+              <option :value="25">25 FPS</option>
+              <option :value="30">30 FPS</option>
+            </select>
           </div>
 
-          <div class="max-h-[280px] overflow-y-auto overflow-x-auto border border-slate-800 rounded-lg">
-            <table class="w-full text-xs text-left">
-              <thead class="text-slate-400 bg-slate-800/90 sticky top-0 border-b border-slate-700">
-                <tr>
-                  <th class="py-2 px-3">#</th>
-                  <th class="py-2 px-3">Frame ID</th>
-                  <th class="py-2 px-3">时间戳</th>
-                  <th class="py-2 px-3">中心坐标 (cx, cy)</th>
-                  <th class="py-2 px-3">尺寸 (w &times; h)</th>
-                  <th class="py-2 px-3">类别</th>
-                  <th class="py-2 px-3">置信度</th>
-                  <th class="py-2 px-3">速度 (km/h)</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-slate-800/80">
-                <tr
-                  v-for="(pt, idx) in replayPoints"
-                  :key="`${pt.frame_id}-${pt.timestamp}-${idx}`"
-                  @click="jumpToPoint(idx)"
-                  class="cursor-pointer transition-colors"
-                  :class="
-                    idx === replayIndex
-                      ? 'bg-indigo-600/25 text-white font-medium'
-                      : 'hover:bg-slate-800/60 text-slate-300'
-                  "
-                >
-                  <td class="py-1.5 px-3 font-mono text-slate-500">{{ idx + 1 }}</td>
-                  <td class="py-1.5 px-3 font-mono text-cyan-300">{{ pt.frame_id }}</td>
-                  <td class="py-1.5 px-3 font-mono text-slate-400">{{ formatTimestamp(pt.timestamp) }}</td>
-                  <td class="py-1.5 px-3 font-mono">({{ pt.cx.toFixed(1) }}, {{ pt.cy.toFixed(1) }})</td>
-                  <td class="py-1.5 px-3 font-mono">{{ pt.w.toFixed(0) }} &times; {{ pt.h.toFixed(0) }}</td>
-                  <td class="py-1.5 px-3">
-                    <span class="badge badge-blue text-[10px]">{{ pt.class_name }}</span>
-                  </td>
-                  <td class="py-1.5 px-3 font-mono text-emerald-400">{{ (pt.confidence * 100).toFixed(0) }}%</td>
-                  <td class="py-1.5 px-3 font-mono text-amber-300">{{ pt.speed.toFixed(1) }}</td>
-                </tr>
-                <tr v-if="replayPoints.length === 0">
-                  <td colspan="8" class="py-8 text-center text-slate-500">
-                    <span>当前筛选条件下无轨迹点数据</span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div class="flex-1 flex items-center gap-3 min-w-[180px]">
+            <input
+              type="range"
+              min="0"
+              :max="Math.max(0, replayPoints.length - 1)"
+              v-model.number="replayIndex"
+              @input="pauseReplay"
+              :disabled="replayPoints.length === 0"
+              class="flex-1 accent-indigo-500 cursor-pointer"
+            />
+            <span class="text-xs font-mono text-slate-400 whitespace-nowrap">
+              {{ replayPoints.length > 0 ? replayIndex + 1 : 0 }} / {{ replayPoints.length }}
+            </span>
           </div>
+        </div>
+      </div>
+
+      <!-- Tabular Trajectory Points List -->
+      <div class="card space-y-2">
+        <div class="flex items-center justify-between">
+          <span class="text-sm font-bold text-slate-100">轨迹点位明细表</span>
+          <span class="text-[11px] text-slate-400">共 {{ replayPoints.length }} 点，点击行跳转对应帧</span>
+        </div>
+
+        <div class="max-h-[260px] overflow-y-auto overflow-x-auto border border-slate-800 rounded-lg">
+          <table class="w-full text-xs text-left">
+            <thead class="text-slate-400 bg-slate-800/90 sticky top-0 border-b border-slate-700">
+              <tr>
+                <th class="py-2 px-3">#</th>
+                <th class="py-2 px-3">Frame ID</th>
+                <th class="py-2 px-3">时间戳</th>
+                <th class="py-2 px-3">中心坐标 (cx, cy)</th>
+                <th class="py-2 px-3">尺寸 (w &times; h)</th>
+                <th class="py-2 px-3">类别</th>
+                <th class="py-2 px-3">置信度</th>
+                <th class="py-2 px-3">速度 (km/h)</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800/80">
+              <tr
+                v-for="(pt, idx) in replayPoints"
+                :key="`${pt.frame_id}-${pt.timestamp}-${idx}`"
+                @click="jumpToPoint(idx)"
+                class="cursor-pointer transition-colors"
+                :class="
+                  idx === replayIndex
+                    ? 'bg-indigo-600/25 text-white font-medium'
+                    : 'hover:bg-slate-800/60 text-slate-300'
+                "
+              >
+                <td class="py-1.5 px-3 font-mono text-slate-500">{{ idx + 1 }}</td>
+                <td class="py-1.5 px-3 font-mono text-cyan-300">{{ pt.frame_id }}</td>
+                <td class="py-1.5 px-3 font-mono text-slate-400">{{ formatTimestamp(pt.timestamp) }}</td>
+                <td class="py-1.5 px-3 font-mono">({{ pt.cx.toFixed(1) }}, {{ pt.cy.toFixed(1) }})</td>
+                <td class="py-1.5 px-3 font-mono">{{ pt.w.toFixed(0) }} &times; {{ pt.h.toFixed(0) }}</td>
+                <td class="py-1.5 px-3">
+                  <span class="badge badge-blue text-[10px]">{{ pt.class_name }}</span>
+                </td>
+                <td class="py-1.5 px-3 font-mono text-emerald-400">{{ (pt.confidence * 100).toFixed(0) }}%</td>
+                <td class="py-1.5 px-3 font-mono text-amber-300">{{ pt.speed.toFixed(1) }}</td>
+              </tr>
+              <tr v-if="replayPoints.length === 0">
+                <td colspan="8" class="py-8 text-center text-slate-500">
+                  <span>当前筛选条件下无轨迹点数据</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -291,7 +328,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useMotStore } from '../stores/motStore';
 import type { TrackPoint, TrackSummary, Zone } from '../types';
 
@@ -306,14 +343,16 @@ const cachedSummaries = ref<TrackSummary[]>([]);
 const replayCanvasRef = ref<HTMLCanvasElement | null>(null);
 const replayIndex = ref<number>(0);
 const isPlaying = ref<boolean>(false);
-const playbackSpeed = ref<number>(1);
+const replayFps = ref<number>(10);
 const showReplayZones = ref<boolean>(false);
-const replayImgLoaded = ref<boolean>(false);
-const replayImgErrored = ref<boolean>(false);
-const probedDims = ref<{ width: number; height: number } | null>(null);
-let playTimer: number | null = null;
 
-// Initialize task selection from store
+const frameBlobUrl = ref<string | null>(null);
+const frameStatus = ref<'idle' | 'loading' | 'loaded' | 'missing'>('idle');
+const probedDims = ref<{ width: number; height: number } | null>(null);
+
+let playTimer: number | null = null;
+let frameAbortController: AbortController | null = null;
+
 watch(
   () => [store.activeTaskId, store.tasks] as const,
   ([activeId, tasks]) => {
@@ -348,80 +387,131 @@ const isSingleTrackMode = computed<boolean>(() => activeTrackDisplayId.value !==
 
 const taskZones = computed<Zone[]>(() => {
   if (!selectedTaskId.value) return store.zones;
-  return store.multiZones[selectedTaskId.value] || (selectedTaskId.value === store.activeTaskId ? store.zones : []);
+  return store.zonesByTask[selectedTaskId.value] || [];
 });
 
-const currentFrameUrl = computed<string | null>(() => {
-  if (!selectedTaskId.value || !currentPoint.value) return null;
-  return `/api/tasks/${selectedTaskId.value}/frame/${currentPoint.value.frame_id}`;
+// Exact frameWidth / frameHeight from X-Frame-Width/Height headers, active stream, or track max bbox fallback
+const frameDims = computed(() => {
+  if (probedDims.value && probedDims.value.width > 0 && probedDims.value.height > 0) {
+    return probedDims.value;
+  }
+  const activeRunFrame = store.framesByTask[selectedTaskId.value];
+  if (activeRunFrame?.frame_width && activeRunFrame?.frame_height) {
+    return { width: activeRunFrame.frame_width, height: activeRunFrame.frame_height };
+  }
+  let maxW = 0;
+  let maxH = 0;
+  for (const pt of replayPoints.value) {
+    const right = pt.cx + pt.w * 0.5;
+    const bottom = pt.cy + pt.h * 0.5;
+    if (right > maxW) maxW = right;
+    if (bottom > maxH) maxH = bottom;
+  }
+  if (maxW > 0 && maxH > 0) {
+    return {
+      width: Math.max(640, Math.ceil(maxW + 40)),
+      height: Math.max(360, Math.ceil(maxH + 40)),
+    };
+  }
+  return { width: 1280, height: 720 };
 });
 
-function onReplayImgLoad() {
-  replayImgLoaded.value = true;
-  replayImgErrored.value = false;
+// Constrain both max-width and max-height while preserving exact frameWidth / frameHeight aspect ratio
+const stageBoxStyle = computed(() => {
+  const w = Math.max(1, frameDims.value.width);
+  const h = Math.max(1, frameDims.value.height);
+  const ratio = w / h;
+  return {
+    aspectRatio: `${w} / ${h}`,
+    width: `min(100%, calc(500px * ${ratio.toFixed(6)}))`,
+  };
+});
+
+function revokeFrameBlob() {
+  if (frameBlobUrl.value) {
+    URL.revokeObjectURL(frameBlobUrl.value);
+    frameBlobUrl.value = null;
+  }
+}
+
+async function loadReplayFrameImage(taskId: number, frameId: number) {
+  if (frameAbortController) {
+    frameAbortController.abort();
+    frameAbortController = null;
+  }
+  const controller = new AbortController();
+  frameAbortController = controller;
+  frameStatus.value = 'loading';
+
+  try {
+    const res = await fetch(`/api/tasks/${taskId}/frame/${frameId}`, {
+      signal: controller.signal,
+    });
+    if (controller.signal.aborted) return;
+
+    const hdrW = Number(res.headers.get('X-Frame-Width') || 0);
+    const hdrH = Number(res.headers.get('X-Frame-Height') || 0);
+    if (hdrW > 0 && hdrH > 0) {
+      probedDims.value = { width: hdrW, height: hdrH };
+    }
+
+    if (!res.ok) {
+      revokeFrameBlob();
+      frameStatus.value = 'missing';
+      await nextTick();
+      drawReplayCanvas();
+      return;
+    }
+
+    const blob = await res.blob();
+    if (controller.signal.aborted) return;
+    revokeFrameBlob();
+    frameBlobUrl.value = URL.createObjectURL(blob);
+    frameStatus.value = 'loaded';
+    await nextTick();
+    drawReplayCanvas();
+  } catch (err: any) {
+    if (err?.name === 'AbortError') return;
+    revokeFrameBlob();
+    frameStatus.value = 'missing';
+    await nextTick();
+    drawReplayCanvas();
+  }
+}
+
+function onReplayImgLoad(e: Event) {
+  const img = e.target as HTMLImageElement;
+  if ((!probedDims.value || probedDims.value.width <= 0) && img.naturalWidth > 0 && img.naturalHeight > 0) {
+    probedDims.value = { width: img.naturalWidth, height: img.naturalHeight };
+  }
+  frameStatus.value = 'loaded';
   drawReplayCanvas();
 }
 
 function onReplayImgError() {
-  replayImgLoaded.value = false;
-  replayImgErrored.value = true;
+  revokeFrameBlob();
+  frameStatus.value = 'missing';
   drawReplayCanvas();
-}
-
-async function probeTaskFrameDims(taskId: number, frameId: number) {
-  try {
-    const res = await fetch(`/api/tasks/${taskId}/frame/${frameId}`);
-    if (res.ok) {
-      const fw = Number(res.headers.get('X-Frame-Width') || 0);
-      const fh = Number(res.headers.get('X-Frame-Height') || 0);
-      if (fw > 0 && fh > 0) {
-        probedDims.value = { width: fw, height: fh };
-      }
-      replayImgErrored.value = false;
-    }
-  } catch (_) {}
 }
 
 watch(selectedTaskId, () => {
   probedDims.value = null;
-  replayImgLoaded.value = false;
-  replayImgErrored.value = false;
+  revokeFrameBlob();
+  frameStatus.value = 'idle';
 });
 
 watch(
-  currentFrameUrl,
-  (url) => {
-    if (url && !probedDims.value && selectedTaskId.value && currentPoint.value) {
-      probeTaskFrameDims(selectedTaskId.value, currentPoint.value.frame_id);
+  () => [selectedTaskId.value, currentPoint.value?.frame_id] as const,
+  ([tid, fid]) => {
+    if (tid && fid !== undefined && fid !== null) {
+      loadReplayFrameImage(tid, fid);
+    } else {
+      revokeFrameBlob();
+      frameStatus.value = 'idle';
     }
   },
   { immediate: true }
 );
-
-const canvasDims = computed(() => {
-  if (probedDims.value && probedDims.value.width > 0 && probedDims.value.height > 0) {
-    return probedDims.value;
-  }
-  const activeRunFrame =
-    store.multiFrames[selectedTaskId.value] ||
-    (selectedTaskId.value === store.activeTaskId ? store.currentFrame : null);
-  if (activeRunFrame?.frame_width && activeRunFrame?.frame_height) {
-    return { width: activeRunFrame.frame_width, height: activeRunFrame.frame_height };
-  }
-  let maxW = 1280;
-  let maxH = 720;
-  for (const z of taskZones.value) {
-    for (const pt of z.polygon || []) {
-      if (pt[0] > maxW) maxW = Math.ceil(pt[0]);
-      if (pt[1] > maxH) maxH = Math.ceil(pt[1]);
-    }
-  }
-  for (const pt of replayPoints.value) {
-    if (pt.cx + pt.w * 0.5 + 40 > maxW) maxW = Math.ceil(pt.cx + pt.w * 0.5 + 40);
-    if (pt.cy + pt.h * 0.5 + 40 > maxH) maxH = Math.ceil(pt.cy + pt.h * 0.5 + 40);
-  }
-  return { width: maxW, height: maxH };
-});
 
 function formatTimestamp(ts: number): string {
   if (!ts) return '-';
@@ -446,6 +536,7 @@ async function handleQuery() {
   ]);
   cachedSummaries.value = [...store.trackSummaries];
   replayIndex.value = 0;
+  await nextTick();
   drawReplayCanvas();
 }
 
@@ -468,6 +559,7 @@ async function selectTrackSummary(summary: TrackSummary) {
     limit: 2000,
   });
   replayIndex.value = 0;
+  await nextTick();
   drawReplayCanvas();
   if (replayPoints.value.length > 1) {
     startPlayback();
@@ -481,7 +573,7 @@ function startPlayback() {
   if (replayIndex.value >= replayPoints.value.length - 1) {
     replayIndex.value = 0;
   }
-  const intervalMs = Math.max(40, Math.round(160 / playbackSpeed.value));
+  const intervalMs = Math.max(30, Math.round(1000 / Math.max(1, replayFps.value)));
   playTimer = window.setInterval(() => {
     if (replayIndex.value < replayPoints.value.length - 1) {
       replayIndex.value += 1;
@@ -504,6 +596,20 @@ function togglePlay() {
   }
 }
 
+function stepPrev() {
+  pauseReplay();
+  if (replayIndex.value > 0) {
+    replayIndex.value -= 1;
+  }
+}
+
+function stepNext() {
+  pauseReplay();
+  if (replayIndex.value < replayPoints.value.length - 1) {
+    replayIndex.value += 1;
+  }
+}
+
 function resetReplay() {
   pauseReplay();
   replayIndex.value = 0;
@@ -523,13 +629,13 @@ function stopTimer() {
   }
 }
 
-watch(playbackSpeed, () => {
+watch(replayFps, () => {
   if (isPlaying.value) {
     startPlayback();
   }
 });
 
-watch([replayIndex, replayPoints, taskZones, canvasDims, showReplayZones], () => {
+watch([replayIndex, replayPoints, taskZones, frameDims, showReplayZones, frameStatus], () => {
   drawReplayCanvas();
 });
 
@@ -543,16 +649,15 @@ function drawReplayCanvas() {
   const h = canvas.height;
   const uiScale = Math.max(1.0, w / 960);
 
-  if (currentFrameUrl.value && !replayImgErrored.value) {
+  if (frameBlobUrl.value && frameStatus.value === 'loaded') {
     ctx.clearRect(0, 0, w, h);
   } else {
-    // Background & spatial reference grid when no video frame is loaded
     ctx.fillStyle = '#090f1d';
     ctx.fillRect(0, 0, w, h);
 
-    ctx.strokeStyle = 'rgba(51, 65, 85, 0.28)';
+    ctx.strokeStyle = 'rgba(51, 65, 85, 0.30)';
     ctx.lineWidth = 1;
-    const gridStep = 80;
+    const gridStep = Math.max(60, Math.round(80 * uiScale));
     for (let gx = 0; gx <= w; gx += gridStep) {
       ctx.beginPath();
       ctx.moveTo(gx, 0);
@@ -567,7 +672,6 @@ function drawReplayCanvas() {
     }
   }
 
-  // Draw configured ROI zones only when explicitly toggled on
   if (showReplayZones.value) {
     for (const z of taskZones.value) {
       if (!z.polygon || z.polygon.length < 3) continue;
@@ -604,9 +708,9 @@ function drawReplayCanvas() {
   const pts = replayPoints.value;
   if (pts.length === 0) {
     ctx.fillStyle = '#64748b';
-    ctx.font = '14px sans-serif';
+    ctx.font = `${Math.round(15 * uiScale)}px sans-serif`;
     ctx.textAlign = 'center';
-    ctx.fillText('暂无可回放轨迹点 — 请选择任务并点击查询，或在左侧选择轨迹卡片', w / 2, h / 2);
+    ctx.fillText('暂无可回放轨迹点 — 请在左侧选择任务查询或点击轨迹卡片', w / 2, h / 2);
     ctx.textAlign = 'left';
     return;
   }
@@ -614,11 +718,10 @@ function drawReplayCanvas() {
   const curIdx = Math.min(Math.max(0, replayIndex.value), pts.length - 1);
 
   if (isSingleTrackMode.value) {
-    // Full future trajectory polyline (subtle dashed)
     ctx.save();
     ctx.beginPath();
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.25)';
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.28)';
+    ctx.lineWidth = Math.max(2, Math.round(2 * uiScale));
     ctx.setLineDash([6, 4]);
     pts.forEach((pt, idx) => {
       if (idx === 0) ctx.moveTo(pt.cx, pt.cy);
@@ -627,12 +730,11 @@ function drawReplayCanvas() {
     ctx.stroke();
     ctx.restore();
 
-    // Traversed polyline up to curIdx
     if (curIdx > 0) {
       ctx.save();
       ctx.beginPath();
       ctx.strokeStyle = '#22d3ee';
-      ctx.lineWidth = 3;
+      ctx.lineWidth = Math.max(3, Math.round(3 * uiScale));
       for (let i = 0; i <= curIdx; i++) {
         if (i === 0) ctx.moveTo(pts[i].cx, pts[i].cy);
         else ctx.lineTo(pts[i].cx, pts[i].cy);
@@ -641,33 +743,31 @@ function drawReplayCanvas() {
       ctx.restore();
     }
 
-    // Start & End markers
     const pStart = pts[0];
     const pEnd = pts[pts.length - 1];
+    const dotR = Math.max(5, Math.round(5 * uiScale));
     ctx.fillStyle = '#10b981';
     ctx.beginPath();
-    ctx.arc(pStart.cx, pStart.cy, 5, 0, Math.PI * 2);
+    ctx.arc(pStart.cx, pStart.cy, dotR, 0, Math.PI * 2);
     ctx.fill();
-    ctx.font = 'bold 11px monospace';
-    ctx.fillText('START', pStart.cx + 8, pStart.cy - 6);
+    ctx.font = `bold ${Math.round(12 * uiScale)}px monospace`;
+    ctx.fillText('START', pStart.cx + dotR + 4, pStart.cy - 6);
 
     ctx.fillStyle = '#f43f5e';
     ctx.beginPath();
-    ctx.arc(pEnd.cx, pEnd.cy, 5, 0, Math.PI * 2);
+    ctx.arc(pEnd.cx, pEnd.cy, dotR, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillText('END', pEnd.cx + 8, pEnd.cy + 14);
+    ctx.fillText('END', pEnd.cx + dotR + 4, pEnd.cy + 14);
   } else {
-    // Multi-track scatter preview up to curIdx
     for (let i = 0; i <= curIdx; i++) {
       const pt = pts[i];
       ctx.fillStyle = i === curIdx ? '#f59e0b' : 'rgba(56, 189, 248, 0.35)';
       ctx.beginPath();
-      ctx.arc(pt.cx, pt.cy, i === curIdx ? 5 : 2.5, 0, Math.PI * 2);
+      ctx.arc(pt.cx, pt.cy, (i === curIdx ? 5 : 2.5) * uiScale, 0, Math.PI * 2);
       ctx.fill();
     }
   }
 
-  // Animated Moving Target Marker + Bounding Box at curIdx
   const cur = pts[curIdx];
   const bx = cur.cx - cur.w * 0.5;
   const by = cur.cy - cur.h * 0.5;
@@ -679,7 +779,6 @@ function drawReplayCanvas() {
   ctx.fillRect(bx, by, cur.w, cur.h);
   ctx.strokeRect(bx, by, cur.w, cur.h);
 
-  // Center moving dot
   ctx.fillStyle = '#fbbf24';
   ctx.beginPath();
   ctx.arc(cur.cx, cur.cy, Math.max(6, Math.round(6 * uiScale)), 0, Math.PI * 2);
@@ -688,18 +787,19 @@ function drawReplayCanvas() {
   ctx.lineWidth = 2;
   ctx.stroke();
 
-  // Larger Crisp Info tag
   const tag = `${activeTrackDisplayId.value ? `Track #${activeTrackDisplayId.value} ` : ''}${cur.class_name} | F${cur.frame_id} | ${cur.speed.toFixed(1)}km/h`;
-  const fontSize = Math.round(16 * uiScale);
+  const fontSize = Math.round(15 * uiScale);
   ctx.font = `bold ${fontSize}px monospace`;
   const tw = ctx.measureText(tag).width;
   const pillH = Math.round(fontSize * 1.45);
   const padX = Math.round(8 * uiScale);
+  const pillW = tw + padX * 2;
+  const tx = Math.max(0, Math.min(bx, w - pillW));
   const ty = Math.max(4, by - pillH - 4);
   ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
-  ctx.fillRect(bx, ty, tw + padX * 2, pillH);
+  ctx.fillRect(tx, ty, pillW, pillH);
   ctx.fillStyle = '#fde68a';
-  ctx.fillText(tag, bx + padX, ty + fontSize);
+  ctx.fillText(tag, tx + padX, ty + fontSize);
   ctx.restore();
 }
 
@@ -719,5 +819,10 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopTimer();
+  if (frameAbortController) {
+    frameAbortController.abort();
+    frameAbortController = null;
+  }
+  revokeFrameBlob();
 });
 </script>

@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from core.detector_adapter import Detection
+from core.gmc import GlobalMotionCompensator, warp_kalman_state
 from core.kalman_filter import KalmanFilter, NSAKalmanFilter
 from core.matching import (
     appearance_cosine_distance,
     class_penalty_matrix,
-    extract_hsv_histogram,
+    extract_hsv_histogram_from_hsv,
     fuse_score,
     iou_distance,
     linear_assignment,
+    prepare_downsampled_hsv,
     velocity_direction_cost,
 )
 from core.trajectory_pool import STrack, TrackState, TrajectoryPool
@@ -44,6 +47,10 @@ class ByteTrackerConfig:
     appearance_weight: float = 0.25
     appearance_ambiguity_thresh: float = 0.15
     appearance_update_interval: int = 10
+    use_gmc: bool = False
+    gmc_method: str = "sparse_optflow"
+    gmc_downscale: int = 2
+    gmc_flick_thresh_px: float = 40.0
 
     @classmethod
     def official_baseline(cls) -> "ByteTrackerConfig":
@@ -57,6 +64,7 @@ class ByteTrackerConfig:
             use_vdc=False,
             use_oru=False,
             use_lazy_appearance=False,
+            use_gmc=False,
         )
 
     @classmethod
@@ -92,28 +100,80 @@ class ByteTracker:
         self.frame_id: int = 0
         self.lazy_appearance_calls: int = 0
         self.total_frames_updated: int = 0
+        self.gmc = GlobalMotionCompensator(
+            method=self.config.gmc_method,
+            downscale=self.config.gmc_downscale,
+            flick_thresh_px=self.config.gmc_flick_thresh_px,
+        )
+        self.last_gmc_shift_px: float = 0.0
 
     def reset(self) -> None:
         self.frame_id = 0
         self.lazy_appearance_calls = 0
         self.total_frames_updated = 0
+        self.last_gmc_shift_px = 0.0
+        self.gmc.reset()
         self.pool.reset()
+
+    def _warp_tracks_for_gmc(self, h_mat: np.ndarray) -> None:
+        """Apply camera affine transform H (prev -> curr) to tracked and lost pools."""
+        if np.allclose(h_mat, np.eye(2, 3, dtype=np.float32), atol=1e-6):
+            return
+
+        rot = np.asarray(h_mat[:, :2], dtype=np.float64)
+        trans = np.asarray(h_mat[:, 2], dtype=np.float64)
+        scale_h = float(np.sqrt(max(1e-4, abs(float(np.linalg.det(rot))))))
+        flick_thresh = self.config.gmc_flick_thresh_px
+
+        all_tracks = self.pool.join_stracks(
+            self.pool.tracked_stracks, self.pool.lost_stracks
+        )
+        for track in all_tracks:
+            if track.mean is not None and track.covariance is not None:
+                track.mean, track.covariance = warp_kalman_state(
+                    track.mean,
+                    track.covariance,
+                    h_mat,
+                    flick_thresh_px=flick_thresh,
+                )
+            if track._last_obs_mean is not None and track._last_obs_cov is not None:
+                track._last_obs_mean, track._last_obs_cov = warp_kalman_state(
+                    track._last_obs_mean,
+                    track._last_obs_cov,
+                    h_mat,
+                    flick_thresh_px=flick_thresh,
+                )
+            if track.last_observation is not None:
+                xy = rot @ track.last_observation[:2] + trans
+                track.last_observation[0] = float(xy[0])
+                track.last_observation[1] = float(xy[1])
+                track.last_observation[3] = float(
+                    max(1.0, track.last_observation[3] * scale_h)
+                )
+            if track.obs_history:
+                warped_obs = deque(maxlen=track.obs_history.maxlen)
+                for fid, ox, oy in track.obs_history:
+                    nxy = rot @ np.array([ox, oy], dtype=np.float64) + trans
+                    warped_obs.append((fid, float(nxy[0]), float(nxy[1])))
+                track.obs_history = warped_obs
 
     def _maybe_update_appearance(
         self,
         track: STrack,
         frame: Optional[np.ndarray],
+        feat_provider: Optional[Callable[[], Optional[np.ndarray]]] = None,
         cached_feat: Optional[np.ndarray] = None,
     ) -> None:
         if frame is None or not self.config.use_lazy_appearance:
             return
         interval = max(1, int(self.config.appearance_update_interval))
         if track.appearance_feat is None or (self.frame_id % interval == 0):
-            feat = (
-                cached_feat
-                if cached_feat is not None
-                else extract_hsv_histogram(frame, track.xyxy)
-            )
+            if cached_feat is not None:
+                feat = cached_feat
+            elif feat_provider is not None:
+                feat = feat_provider()
+            else:
+                feat = None
             track.update_appearance(feat)
 
     def predict_only(self, frame_id: Optional[int] = None) -> List[STrack]:
@@ -154,7 +214,15 @@ class ByteTracker:
         lost_stracks: List[STrack] = []
         removed_stracks: List[STrack] = []
 
-        # 1. Partition detections into high-confidence and low-confidence sets
+        # 1. Global Motion Compensation (camera pan / UAV / FPS flick warp)
+        if cfg.use_gmc and frame is not None:
+            h_mat = self.gmc.apply(frame, bboxes=[d.bbox for d in detections])
+            self.last_gmc_shift_px = float(self.gmc.last_shift_px)
+            self._warp_tracks_for_gmc(h_mat)
+        else:
+            self.last_gmc_shift_px = 0.0
+
+        # 2. Partition detections into high-confidence and low-confidence sets
         high_dets: List[Detection] = []
         low_dets: List[Detection] = []
         for det in detections:
@@ -166,7 +234,7 @@ class ByteTracker:
         high_stracks = [STrack(d) for d in high_dets]
         low_stracks = [STrack(d) for d in low_dets]
 
-        # 2. Split existing tracked_stracks into confirmed vs unconfirmed
+        # 3. Split existing tracked_stracks into confirmed vs unconfirmed
         unconfirmed: List[STrack] = []
         tracked_stracks: List[STrack] = []
         for track in self.pool.tracked_stracks:
@@ -222,7 +290,26 @@ class ByteTracker:
                 track_vels, track_anchors, det_centers
             )
 
-        det_feats_cache: dict[int, Optional[np.ndarray]] = {}
+        det_feats_cache: Dict[int, Optional[np.ndarray]] = {}
+        hsv_cache: Optional[Tuple[np.ndarray, float, float, int, int]] = None
+        hsv_ready = False
+
+        def get_det_feat(det_idx: int, bbox: np.ndarray) -> Optional[np.ndarray]:
+            nonlocal hsv_cache, hsv_ready
+            if det_idx in det_feats_cache:
+                return det_feats_cache[det_idx]
+            if frame is None:
+                det_feats_cache[det_idx] = None
+                return None
+            if not hsv_ready:
+                hsv_cache = prepare_downsampled_hsv(frame)
+                hsv_ready = True
+            feat = extract_hsv_histogram_from_hsv(
+                hsv_cache, bbox, fallback_frame=frame
+            )
+            det_feats_cache[det_idx] = feat
+            return feat
+
         if (
             cfg.use_lazy_appearance
             and frame is not None
@@ -264,12 +351,9 @@ class ByteTracker:
                     ]
                     if not cand_cols:
                         continue
-                    for j in cand_cols:
-                        if j not in det_feats_cache:
-                            det_feats_cache[j] = extract_hsv_histogram(
-                                frame, high_dets[j].bbox
-                            )
-                    cand_feats = [det_feats_cache[j] for j in cand_cols]
+                    cand_feats = [
+                        get_det_feat(j, high_dets[j].bbox) for j in cand_cols
+                    ]
                     app_dists = appearance_cosine_distance(
                         [track.appearance_feat], cand_feats
                     )[0]
@@ -279,12 +363,18 @@ class ByteTracker:
         matches, u_track, u_detection = linear_assignment(dists, thresh=cfg.match_thresh)
 
         for itracked, idet in matches:
+            det_idx = int(idet)
             track = strack_pool[itracked]
-            det_track = high_stracks[idet]
+            det_track = high_stracks[det_idx]
             if track.state == TrackState.TRACKED:
                 track.update(det_track, self.frame_id)
                 self._maybe_update_appearance(
-                    track, frame, cached_feat=det_feats_cache.get(int(idet))
+                    track,
+                    frame,
+                    feat_provider=lambda idx=det_idx: get_det_feat(
+                        idx, high_dets[idx].bbox
+                    ),
+                    cached_feat=det_feats_cache.get(det_idx),
                 )
                 activated_stracks.append(track)
             else:
@@ -292,7 +382,12 @@ class ByteTracker:
                     det_track, self.frame_id, new_id=None, use_oru=cfg.use_oru
                 )
                 self._maybe_update_appearance(
-                    track, frame, cached_feat=det_feats_cache.get(int(idet))
+                    track,
+                    frame,
+                    feat_provider=lambda idx=det_idx: get_det_feat(
+                        idx, high_dets[idx].bbox
+                    ),
+                    cached_feat=det_feats_cache.get(det_idx),
                 )
                 refind_stracks.append(track)
 
@@ -379,7 +474,12 @@ class ByteTracker:
             unconf_track.update(rem_high_stracks[idet], self.frame_id)
             orig_idx = int(u_detection[idet])
             self._maybe_update_appearance(
-                unconf_track, frame, cached_feat=det_feats_cache.get(orig_idx)
+                unconf_track,
+                frame,
+                feat_provider=lambda idx=orig_idx: get_det_feat(
+                    idx, high_dets[idx].bbox
+                ),
+                cached_feat=det_feats_cache.get(orig_idx),
             )
             activated_stracks.append(unconf_track)
 
@@ -398,7 +498,12 @@ class ByteTracker:
             )
             orig_idx = int(u_detection[idet])
             self._maybe_update_appearance(
-                track, frame, cached_feat=det_feats_cache.get(orig_idx)
+                track,
+                frame,
+                feat_provider=lambda idx=orig_idx: get_det_feat(
+                    idx, high_dets[idx].bbox
+                ),
+                cached_feat=det_feats_cache.get(orig_idx),
             )
             activated_stracks.append(track)
 

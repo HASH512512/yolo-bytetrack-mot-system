@@ -171,6 +171,10 @@ class PipelineResult:
     is_keyframe: bool = True
     keyframe_reason: str = "always"
     frame: Optional[np.ndarray] = None
+    gmc_shift_px: float = 0.0
+
+
+FrameResult = PipelineResult
 
 
 def execute_frame_postprocess(
@@ -195,6 +199,8 @@ def execute_frame_postprocess(
     else:
         tracks = tracker_predict_only_safe(tracker, frame_id=packet.frame_id)
         track_ms = (time.perf_counter() - t_trk_0) * 1000.0
+
+    gmc_shift_px = float(getattr(tracker, "last_gmc_shift_px", 0.0))
 
     t_rul_0 = time.perf_counter()
     violations = (
@@ -224,6 +230,7 @@ def execute_frame_postprocess(
         is_keyframe=is_keyframe,
         keyframe_reason=keyframe_reason,
         frame=packet.frame if include_frame else None,
+        gmc_shift_px=gmc_shift_px,
     )
 
 
@@ -424,4 +431,5 @@ class BatchInferenceScheduler:
             "keyframes": keyframes,
             "skipped_detect_frames": skipped,
             "detect_skip_ratio": round(float(skip_ratio), 4),
+            "gmc_shift_px": float(getattr(self.tracker, "last_gmc_shift_px", 0.0)),
         }

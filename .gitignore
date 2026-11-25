@@ -23,6 +23,11 @@ benchmarks/
 *.mp4
 *.avi
 
+# Built-in portable starter weights
+!weights/
+!weights/yolov8n.pt
+!weights/yolov8n.onnx
+
 # Environment & IDE
 .env
 .vscode/

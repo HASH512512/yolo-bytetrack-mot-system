@@ -2,6 +2,7 @@ export type TaskStatus = 'idle' | 'running' | 'paused' | 'stopped' | 'error';
 export type ViolationType = 'wrong_way' | 'wrong-way' | 'intrusion' | 'loitering';
 export type ZoneType = 'intrusion' | 'lane' | 'loitering';
 export type DetectorType = 'mock' | 'yolo' | 'onnx' | 'tensorrt';
+export type GmcMethod = 'none' | 'sparse_optflow' | 'phase' | 'hybrid';
 export type ActiveTab = 'monitoring' | 'tracks' | 'violations' | 'ablation';
 
 export interface StreamConfig {
@@ -24,6 +25,8 @@ export interface StreamConfig {
   use_vdc?: boolean;
   use_oru?: boolean;
   use_lazy_appearance?: boolean;
+  use_gmc?: boolean;
+  gmc_method?: GmcMethod | string;
   adaptive_skip?: boolean;
   max_skip_stride?: number;
   downsample_fps: number;
@@ -81,6 +84,17 @@ export interface SystemMetrics {
   detect_skip_ratio?: number;
   is_demo_simulation?: boolean;
   active_streams?: number;
+  gmc_shift_px?: number;
+}
+
+export interface LatencySample {
+  frameId: number;
+  total: number;
+  p95: number;
+  decode: number;
+  detect: number;
+  track: number;
+  rules: number;
 }
 
 export interface ViolationEvent {
@@ -158,6 +172,29 @@ export interface LocalAssetsResponse {
   videos: string[];
   datasets: string[];
   weights: string[];
+}
+
+export interface StreamPresetItem {
+  id: string;
+  label: string;
+  source: string;
+  source_type: string;
+  description?: string;
+  recommended_use_gmc?: boolean;
+  recommended_gmc_method?: GmcMethod | string;
+}
+
+export interface StreamPresetsResponse {
+  presets: StreamPresetItem[];
+  weights: string[];
+  videos: string[];
+  datasets: string[];
+}
+
+export interface VideoUploadResponse {
+  path: string;
+  filename: string;
+  size_bytes: number;
 }
 
 export interface BenchmarkTable {

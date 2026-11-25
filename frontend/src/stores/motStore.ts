@@ -5,12 +5,15 @@ import type {
   BenchmarksResponse,
   LocalAssetsResponse,
   StreamConfig,
+  StreamPresetItem,
+  StreamPresetsResponse,
   SystemMetrics,
   Task,
   TrackFrame,
   TrackPoint,
   TrackQueryResponse,
   TrackSummary,
+  VideoUploadResponse,
   ViolationEvent,
   Zone,
 } from '../types';
@@ -24,42 +27,44 @@ export interface FetchTracksParams {
   limit?: number;
 }
 
+function emptySystemMetrics(activeStreams = 0): SystemMetrics {
+  return {
+    fps: 0,
+    p95_latency_ms: 0,
+    avg_latency_ms: 0,
+    drop_count: 0,
+    queue_size: 0,
+    detect_skip_ratio: 0,
+    is_demo_simulation: false,
+    active_streams: activeStreams,
+    gmc_shift_px: 0,
+    stage_latency: {
+      decode_ms: 0,
+      detect_ms: 0,
+      track_ms: 0,
+      rules_ms: 0,
+      total_ms: 0,
+    },
+  };
+}
+
 export const useMotStore = defineStore('mot', {
   state: () => ({
     tasks: [] as Task[],
     activeTaskId: null as number | null,
-    zones: [] as Zone[],
     violations: [] as ViolationEvent[],
-    currentFrame: null as TrackFrame | null,
-    systemMetrics: {
-      fps: 0,
-      p95_latency_ms: 0,
-      avg_latency_ms: 0,
-      drop_count: 0,
-      queue_size: 0,
-      detect_skip_ratio: 0,
-      is_demo_simulation: false,
-      active_streams: 0,
-      stage_latency: {
-        decode_ms: 0,
-        detect_ms: 0,
-        track_ms: 0,
-        rules_ms: 0,
-        total_ms: 0,
-      },
-    } as SystemMetrics,
+    systemMetrics: emptySystemMetrics(),
     ablationResults: [] as AblationResult[],
     ablationLoading: false,
-    wsConnected: false,
     wsError: null as string | null,
     taskError: null as string | null,
     activeTab: 'monitoring' as ActiveTab,
 
-    // Multi-stream concurrency state
+    // Single-source-of-truth per-task stream & metadata maps
     multiTaskIds: [] as number[],
-    multiFrames: {} as Record<number, TrackFrame>,
-    multiZones: {} as Record<number, Zone[]>,
-    multiWsStatus: {} as Record<number, boolean>,
+    framesByTask: {} as Record<number, TrackFrame>,
+    zonesByTask: {} as Record<number, Zone[]>,
+    wsConnectedByTask: {} as Record<number, boolean>,
 
     // Trajectory retrieval & replay state
     trackSummaries: [] as TrackSummary[],
@@ -67,12 +72,13 @@ export const useMotStore = defineStore('mot', {
     tracksLoading: false,
     tracksTaskId: null as number | null,
 
-    // Local assets & benchmark results
+    // Local assets, stream presets & benchmark results
     localAssets: {
       videos: [],
       datasets: [],
       weights: [],
     } as LocalAssetsResponse,
+    streamPresets: [] as StreamPresetItem[],
     lockedBenchmarks: {
       available: false,
       experiments: {},
@@ -90,20 +96,43 @@ export const useMotStore = defineStore('mot', {
     // Prevent multiple demos fighting for GPU unless multi-stream concurrency is explicitly desired
     singleStreamExclusive: true,
 
-    // Internal WS references
-    _ws: null as WebSocket | null,
-    _multiWs: {} as Record<number, WebSocket>,
+    // Single unified WebSocket map keyed by taskId
+    _wsByTask: {} as Record<number, WebSocket>,
   }),
 
   getters: {
     activeTask(state): Task | undefined {
       return state.tasks.find((t) => t.id === state.activeTaskId);
     },
+    currentFrame(state): TrackFrame | null {
+      return state.activeTaskId ? state.framesByTask[state.activeTaskId] || null : null;
+    },
+    wsConnected(state): boolean {
+      return state.activeTaskId ? Boolean(state.wsConnectedByTask[state.activeTaskId]) : false;
+    },
+    zones(state): Zone[] {
+      return state.activeTaskId ? state.zonesByTask[state.activeTaskId] || [] : [];
+    },
+    multiFrames(state): Record<number, TrackFrame> {
+      return state.framesByTask;
+    },
+    multiZones(state): Record<number, Zone[]> {
+      return state.zonesByTask;
+    },
+    multiWsStatus(state): Record<number, boolean> {
+      return state.wsConnectedByTask;
+    },
     unacknowledgedViolations(state): ViolationEvent[] {
       return state.violations.filter((v) => !v.acknowledged);
     },
     activeTracksCount(state): number {
-      return state.currentFrame?.tracks?.length || 0;
+      return state.activeTaskId ? state.framesByTask[state.activeTaskId]?.tracks?.length || 0 : 0;
+    },
+    defaultWeightPath(state): string {
+      const weights = state.localAssets.weights || [];
+      if (weights.includes('weights/yolov8n.pt')) return 'weights/yolov8n.pt';
+      const firstPt = weights.find((w) => w.toLowerCase().endsWith('.pt'));
+      return firstPt || weights[0] || 'weights/yolov8n.pt';
     },
   },
 
@@ -125,6 +154,33 @@ export const useMotStore = defineStore('mot', {
       }
     },
 
+    _closeTaskWs(taskId: number) {
+      const ws = this._wsByTask[taskId];
+      if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
+        try {
+          ws.close();
+        } catch (_) {}
+        delete this._wsByTask[taskId];
+      }
+      if (taskId in this.wsConnectedByTask) {
+        const nextStatus = { ...this.wsConnectedByTask };
+        delete nextStatus[taskId];
+        this.wsConnectedByTask = nextStatus;
+      }
+    },
+
+    _clearTaskFrame(taskId: number) {
+      if (taskId in this.framesByTask) {
+        const nextFrames = { ...this.framesByTask };
+        delete nextFrames[taskId];
+        this.framesByTask = nextFrames;
+      }
+    },
+
     async fetchTasks() {
       try {
         const res = await fetch('/api/tasks');
@@ -139,7 +195,7 @@ export const useMotStore = defineStore('mot', {
       }
     },
 
-    async createTask(payload: { name: string; video_source: string; config?: any }) {
+    async createTask(payload: { name: string; video_source: string; config?: Partial<StreamConfig> }): Promise<Task | null> {
       this.taskError = null;
       try {
         const res = await fetch('/api/tasks', {
@@ -162,29 +218,47 @@ export const useMotStore = defineStore('mot', {
       return null;
     },
 
+    async uploadVideo(file: File): Promise<VideoUploadResponse | null> {
+      this.taskError = null;
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const res = await fetch('/api/videos/upload', {
+          method: 'POST',
+          body: formData,
+        });
+        if (res.ok) {
+          const data: VideoUploadResponse = await res.json();
+          await this.fetchLocalAssets();
+          return data;
+        }
+        const errBody = await res.json().catch(() => null);
+        this.taskError = errBody?.detail || `视频上传失败 (HTTP ${res.status})`;
+      } catch (err) {
+        console.error('Failed to upload video:', err);
+        this.taskError = String(err);
+      }
+      return null;
+    },
+
     async deleteTask(id: number) {
       try {
         const res = await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
         if (res.ok) {
           this.tasks = this.tasks.filter((t) => t.id !== id);
-          if (this._multiWs[id]) {
-            try {
-              this._multiWs[id].close();
-            } catch (_) {}
-            delete this._multiWs[id];
-            delete this.multiWsStatus[id];
-            delete this.multiFrames[id];
-          }
+          this._closeTaskWs(id);
+          this._clearTaskFrame(id);
+          const nextZones = { ...this.zonesByTask };
+          delete nextZones[id];
+          this.zonesByTask = nextZones;
           this.multiTaskIds = this.multiTaskIds.filter((tid) => tid !== id);
 
           if (this.activeTaskId === id) {
-            this.disconnectWebSocket();
-            this.currentFrame = null;
             this.activeTaskId = this.tasks[0]?.id || null;
             if (this.activeTaskId) {
-              this.fetchZones(this.activeTaskId);
+              this.fetchZonesForTask(this.activeTaskId);
               if (this.tasks[0]?.status === 'running') {
-                this.connectWebSocket(this.activeTaskId);
+                this.connectTaskWs(this.activeTaskId);
               }
             }
           }
@@ -208,15 +282,12 @@ export const useMotStore = defineStore('mot', {
         if (res.ok) {
           const task = this.tasks.find((t) => t.id === id);
           if (task) task.status = 'running';
-          if (this.activeTaskId !== id && useExclusive) {
+          if (this.activeTaskId !== id && (useExclusive || !this.activeTaskId)) {
             this.activeTaskId = id;
-            this.currentFrame = null;
-            this.fetchZones(id);
+            this.displaySettings.showZones = Boolean(task?.config?.enable_roi_rules);
+            this.fetchZonesForTask(id);
           }
-          if (this.activeTaskId === id) {
-            this.connectWebSocket(id);
-          }
-          if (this.multiTaskIds.includes(id)) {
+          if (this.activeTaskId === id || this.multiTaskIds.includes(id)) {
             this.connectTaskWs(id);
           }
         } else {
@@ -237,43 +308,12 @@ export const useMotStore = defineStore('mot', {
           const task = this.tasks.find((t) => t.id === id);
           if (task) task.status = 'stopped';
 
-          if (this.activeTaskId === id) {
-            this.disconnectWebSocket();
-            this.currentFrame = null;
-          }
-          if (this._multiWs[id]) {
-            try {
-              this._multiWs[id].close();
-            } catch (_) {}
-            delete this._multiWs[id];
-          }
-          const nextStatus = { ...this.multiWsStatus };
-          delete nextStatus[id];
-          this.multiWsStatus = nextStatus;
+          this._closeTaskWs(id);
+          this._clearTaskFrame(id);
 
-          const nextFrames = { ...this.multiFrames };
-          delete nextFrames[id];
-          this.multiFrames = nextFrames;
-
-          const anyRunning = this.tasks.some((t) => t.status === 'running');
-          if (!anyRunning || this.activeTaskId === id) {
-            this.systemMetrics = {
-              fps: 0,
-              p95_latency_ms: 0,
-              avg_latency_ms: 0,
-              drop_count: 0,
-              queue_size: 0,
-              detect_skip_ratio: 0,
-              is_demo_simulation: false,
-              active_streams: this.tasks.filter((t) => t.status === 'running').length,
-              stage_latency: {
-                decode_ms: 0,
-                detect_ms: 0,
-                track_ms: 0,
-                rules_ms: 0,
-                total_ms: 0,
-              },
-            };
+          const remainingRunning = this.tasks.filter((t) => t.status === 'running').length;
+          if (remainingRunning === 0 || this.activeTaskId === id) {
+            this.systemMetrics = emptySystemMetrics(remainingRunning);
           }
         }
       } catch (err) {
@@ -283,16 +323,24 @@ export const useMotStore = defineStore('mot', {
 
     setActiveTask(id: number) {
       if (this.activeTaskId === id) return;
+      const prevId = this.activeTaskId;
       this.activeTaskId = id;
-      this.currentFrame = null;
-      this.disconnectWebSocket();
+
+      if (prevId && !this.multiTaskIds.includes(prevId)) {
+        this._closeTaskWs(prevId);
+      }
+
       const target = this.tasks.find((t) => t.id === id);
       if (target) {
         this.displaySettings.showZones = Boolean(target.config?.enable_roi_rules);
       }
-      this.fetchZones(id);
+      this.fetchZonesForTask(id);
       if (target?.status === 'running') {
-        this.connectWebSocket(id);
+        this.connectTaskWs(id);
+      } else {
+        this._clearTaskFrame(id);
+        const remainingRunning = this.tasks.filter((t) => t.status === 'running').length;
+        this.systemMetrics = emptySystemMetrics(remainingRunning);
       }
     },
 
@@ -319,13 +367,8 @@ export const useMotStore = defineStore('mot', {
           if (taskId === this.activeTaskId && patch.enable_roi_rules !== undefined) {
             this.displaySettings.showZones = Boolean(patch.enable_roi_rules);
           }
-          if (updated.status === 'running') {
-            if (taskId === this.activeTaskId) {
-              this.connectWebSocket(taskId);
-            }
-            if (this.multiTaskIds.includes(taskId)) {
-              this.connectTaskWs(taskId);
-            }
+          if (updated.status === 'running' && (taskId === this.activeTaskId || this.multiTaskIds.includes(taskId))) {
+            this.connectTaskWs(taskId);
           }
           return updated;
         }
@@ -339,18 +382,9 @@ export const useMotStore = defineStore('mot', {
     },
 
     async fetchZones(taskId?: number) {
-      try {
-        const url = taskId ? `/api/zones?task_id=${taskId}` : '/api/zones';
-        const res = await fetch(url);
-        if (res.ok) {
-          const data: Zone[] = await res.json();
-          this.zones = data;
-          if (taskId) {
-            this.multiZones = { ...this.multiZones, [taskId]: data };
-          }
-        }
-      } catch (err) {
-        console.error('Failed to fetch zones:', err);
+      const targetId = taskId ?? this.activeTaskId;
+      if (targetId) {
+        await this.fetchZonesForTask(targetId);
       }
     },
 
@@ -359,10 +393,7 @@ export const useMotStore = defineStore('mot', {
         const res = await fetch(`/api/zones?task_id=${taskId}`);
         if (res.ok) {
           const data: Zone[] = await res.json();
-          this.multiZones = { ...this.multiZones, [taskId]: data };
-          if (taskId === this.activeTaskId) {
-            this.zones = data;
-          }
+          this.zonesByTask = { ...this.zonesByTask, [taskId]: data };
         }
       } catch (err) {
         console.error(`Failed to fetch zones for task ${taskId}:`, err);
@@ -485,6 +516,23 @@ export const useMotStore = defineStore('mot', {
       }
     },
 
+    async fetchStreamPresets() {
+      try {
+        const res = await fetch('/api/stream_presets');
+        if (res.ok) {
+          const data: StreamPresetsResponse = await res.json();
+          this.streamPresets = data.presets || [];
+          this.localAssets = {
+            videos: data.videos || this.localAssets.videos,
+            datasets: data.datasets || this.localAssets.datasets,
+            weights: data.weights || this.localAssets.weights,
+          };
+        }
+      } catch (err) {
+        console.error('Failed to fetch stream presets:', err);
+      }
+    },
+
     async fetchLockedBenchmarks() {
       try {
         const res = await fetch('/api/benchmarks');
@@ -501,115 +549,77 @@ export const useMotStore = defineStore('mot', {
     },
 
     connectWebSocket(taskId: number) {
-      this.disconnectWebSocket();
+      this.connectTaskWs(taskId);
+    },
+
+    disconnectWebSocket() {
+      if (this.activeTaskId && !this.multiTaskIds.includes(this.activeTaskId)) {
+        this._closeTaskWs(this.activeTaskId);
+      }
+    },
+
+    connectTaskWs(taskId: number) {
+      this._closeTaskWs(taskId);
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/ws/stream/${taskId}`;
 
       try {
         const ws = new WebSocket(wsUrl);
-        this._ws = ws;
+        this._wsByTask[taskId] = ws;
 
         ws.onopen = () => {
-          this.wsConnected = true;
-          this.wsError = null;
+          if (this._wsByTask[taskId] !== ws) return;
+          this.wsConnectedByTask = { ...this.wsConnectedByTask, [taskId]: true };
+          if (taskId === this.activeTaskId) {
+            this.wsError = null;
+          }
         };
 
         ws.onmessage = (event) => {
-          if (event.data === 'pong') return;
+          if (this._wsByTask[taskId] !== ws || event.data === 'pong') return;
           try {
             const frame: TrackFrame = JSON.parse(event.data);
             if ((frame as any).error) {
-              this.wsError = String((frame as any).error);
+              if (taskId === this.activeTaskId) {
+                this.wsError = String((frame as any).error);
+              }
               return;
             }
-            this.currentFrame = frame;
-            this.multiFrames = { ...this.multiFrames, [taskId]: frame };
-            if (frame.metrics) {
+            const task = this.tasks.find((t) => t.id === taskId);
+            if (task && task.status !== 'running') {
+              return;
+            }
+            this.framesByTask = { ...this.framesByTask, [taskId]: frame };
+            if (taskId === this.activeTaskId && frame.metrics) {
               this.systemMetrics = frame.metrics;
             }
             this._ingestFrameViolations(frame);
           } catch (e) {
-            console.error('Error parsing WS frame:', e);
+            console.error(`Error parsing WS frame for task ${taskId}:`, e);
           }
         };
 
         ws.onerror = () => {
-          this.wsError = 'WebSocket connection error';
-          this.wsConnected = false;
+          if (this._wsByTask[taskId] !== ws) return;
+          this.wsConnectedByTask = { ...this.wsConnectedByTask, [taskId]: false };
+          if (taskId === this.activeTaskId) {
+            this.wsError = 'WebSocket connection error';
+          }
         };
 
         ws.onclose = () => {
-          if (this._ws === ws) {
-            this.wsConnected = false;
+          if (this._wsByTask[taskId] === ws) {
+            delete this._wsByTask[taskId];
+            this.wsConnectedByTask = { ...this.wsConnectedByTask, [taskId]: false };
           }
         };
       } catch (err) {
-        this.wsError = String(err);
-        this.wsConnected = false;
-      }
-    },
-
-    disconnectWebSocket() {
-      if (this._ws) {
-        try {
-          this._ws.close();
-        } catch (_) {}
-        this._ws = null;
-      }
-      this.wsConnected = false;
-    },
-
-    connectTaskWs(taskId: number) {
-      if (this._multiWs[taskId]) {
-        try {
-          this._multiWs[taskId].close();
-        } catch (_) {}
-        delete this._multiWs[taskId];
-      }
-
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws/stream/${taskId}`;
-
-      try {
-        const ws = new WebSocket(wsUrl);
-        this._multiWs[taskId] = ws;
-
-        ws.onopen = () => {
-          this.multiWsStatus = { ...this.multiWsStatus, [taskId]: true };
-        };
-
-        ws.onmessage = (event) => {
-          if (event.data === 'pong') return;
-          try {
-            const frame: TrackFrame = JSON.parse(event.data);
-            if ((frame as any).error) return;
-            this.multiFrames = { ...this.multiFrames, [taskId]: frame };
-            if (taskId === this.activeTaskId) {
-              this.currentFrame = frame;
-              if (frame.metrics) {
-                this.systemMetrics = frame.metrics;
-              }
-            }
-            this._ingestFrameViolations(frame);
-          } catch (e) {
-            console.error(`Error parsing multi-WS frame for task ${taskId}:`, e);
-          }
-        };
-
-        ws.onerror = () => {
-          this.multiWsStatus = { ...this.multiWsStatus, [taskId]: false };
-        };
-
-        ws.onclose = () => {
-          if (this._multiWs[taskId] === ws) {
-            this.multiWsStatus = { ...this.multiWsStatus, [taskId]: false };
-            delete this._multiWs[taskId];
-          }
-        };
-      } catch (err) {
-        console.error(`Failed to connect multi-WS for task ${taskId}:`, err);
-        this.multiWsStatus = { ...this.multiWsStatus, [taskId]: false };
+        console.error(`Failed to connect WS for task ${taskId}:`, err);
+        this.wsConnectedByTask = { ...this.wsConnectedByTask, [taskId]: false };
+        if (taskId === this.activeTaskId) {
+          this.wsError = String(err);
+        }
       }
     },
 
@@ -617,45 +627,43 @@ export const useMotStore = defineStore('mot', {
       const uniqueIds = Array.from(new Set(ids.filter((id) => Number.isFinite(id) && id > 0)));
       this.multiTaskIds = uniqueIds;
 
-      // Close sockets no longer in active layout
-      for (const key of Object.keys(this._multiWs)) {
+      const wanted = new Set<number>(uniqueIds);
+      if (this.activeTaskId && this.activeTask?.status === 'running') {
+        wanted.add(this.activeTaskId);
+      }
+
+      // Close sockets no longer needed
+      for (const key of Object.keys(this._wsByTask)) {
         const tid = Number(key);
-        if (!uniqueIds.includes(tid)) {
-          try {
-            this._multiWs[tid].close();
-          } catch (_) {}
-          delete this._multiWs[tid];
-          const nextStatus = { ...this.multiWsStatus };
-          delete nextStatus[tid];
-          this.multiWsStatus = nextStatus;
+        if (!wanted.has(tid)) {
+          this._closeTaskWs(tid);
         }
       }
 
-      // Open sockets only for already running panes & fetch zones
+      // Ensure running panes have active WS & cached zones
       for (const tid of uniqueIds) {
         const task = this.tasks.find((t) => t.id === tid);
-        const existing = this._multiWs[tid];
+        const existing = this._wsByTask[tid];
         if (
           task?.status === 'running' &&
           (!existing || (existing.readyState !== WebSocket.OPEN && existing.readyState !== WebSocket.CONNECTING))
         ) {
           this.connectTaskWs(tid);
         }
-        if (!this.multiZones[tid]) {
+        if (!this.zonesByTask[tid]) {
           this.fetchZonesForTask(tid);
         }
       }
     },
 
     disconnectMultiStreams() {
-      for (const key of Object.keys(this._multiWs)) {
+      this.multiTaskIds = [];
+      for (const key of Object.keys(this._wsByTask)) {
         const tid = Number(key);
-        try {
-          this._multiWs[tid].close();
-        } catch (_) {}
+        if (tid !== this.activeTaskId || this.activeTask?.status !== 'running') {
+          this._closeTaskWs(tid);
+        }
       }
-      this._multiWs = {};
-      this.multiWsStatus = {};
     },
   },
 });

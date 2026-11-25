@@ -21,6 +21,7 @@ from core.detector_adapter import (
     letterbox,
     nms_boxes,
 )
+from core.gmc import GlobalMotionCompensator, warp_kalman_state
 from core.kalman_filter import KalmanFilter, NSAKalmanFilter
 from core.matching import (
     appearance_cosine_distance,
@@ -28,9 +29,11 @@ from core.matching import (
     bbox_iou_matrix,
     class_penalty_matrix,
     extract_hsv_histogram,
+    extract_hsv_histogram_from_hsv,
     fuse_score,
     iou_distance,
     linear_assignment,
+    prepare_downsampled_hsv,
     velocity_direction_cost,
 )
 from core.trajectory_pool import STrack, TrackState, TrajectoryPool
@@ -621,3 +624,234 @@ def test_gpu_letterbox_batch_and_trt_missing_file(tmp_path):
     adapter = TensorRTDetectorAdapter(missing_engine, lazy_load=True)
     with pytest.raises(FileNotFoundError):
         adapter.detect(frames[0])
+
+
+def _make_textured_canvas(width: int = 1800, height: int = 800, seed: int = 17) -> np.ndarray:
+    import cv2
+
+    rng = np.random.default_rng(seed)
+    bg = np.full((height, width, 3), 30, dtype=np.uint8)
+    for _ in range(550):
+        x = int(rng.integers(15, width - 15))
+        y = int(rng.integers(15, height - 15))
+        r = int(rng.integers(4, 16))
+        col = tuple(int(c) for c in rng.integers(90, 255, size=3))
+        cv2.circle(bg, (x, y), r, col, -1)
+        cv2.rectangle(bg, (x - 5, y - 5), (x + 5, y + 5), (240, 240, 240), 1)
+    return bg
+
+
+def test_gmc_methods_shift_recovery_and_warp_kalman_state(monkeypatch):
+    import cv2
+
+    bg = _make_textured_canvas(1600, 720)
+    f1 = bg[100:580, 500:1140].copy()
+    # Pan camera left + up => scene shifts (+50 px right, +12 px down)
+    f2 = bg[88:568, 450:1090].copy()
+
+    # Paint a moving foreground decoy box that must NOT bias background GMC
+    f1_fg = f1.copy()
+    f2_fg = f2.copy()
+    cv2.rectangle(f1_fg, (100, 100), (220, 240), (0, 255, 0), -1)
+    cv2.rectangle(f2_fg, (40, 120), (160, 260), (0, 255, 0), -1)
+
+    for method in ("sparse_optflow", "phase", "hybrid"):
+        gmc = GlobalMotionCompensator(method=method, downscale=2, flick_thresh_px=40.0)
+        h1 = gmc.apply(f1_fg, bboxes=[[100, 100, 220, 240]])
+        assert np.allclose(h1, np.eye(2, 3), atol=1e-5)
+        assert gmc.last_shift_px == 0.0
+
+        h2 = gmc.apply(f2_fg, bboxes=[[40, 120, 160, 260]])
+        assert abs(float(h2[0, 2]) - 50.0) < 3.0
+        assert abs(float(h2[1, 2]) - 12.0) < 3.0
+        assert gmc.last_shift_px > 45.0
+        assert gmc.avg_gmc_ms >= 0.0
+
+        gmc.reset()
+        assert gmc.last_shift_px == 0.0
+        assert gmc.avg_gmc_ms == 0.0
+
+    # Verify "none" returns identity
+    gmc_none = GlobalMotionCompensator(method="none")
+    assert np.allclose(gmc_none.apply(f1), np.eye(2, 3))
+    assert np.allclose(gmc_none.apply(f2), np.eye(2, 3))
+
+    # Verify "hybrid" falls back to "phase" when sparse_optflow yields < min_inliers
+    gmc_hybrid = GlobalMotionCompensator(method="hybrid", downscale=2)
+    gmc_hybrid.apply(f1)
+    monkeypatch.setattr(
+        gmc_hybrid,
+        "_estimate_sparse_optflow",
+        lambda *args, **kwargs: (None, 0),
+    )
+    h_fb = gmc_hybrid.apply(f2)
+    assert abs(float(h_fb[0, 2]) - 50.0) < 2.0
+    assert abs(float(h_fb[1, 2]) - 12.0) < 2.0
+
+    # Verify warp_kalman_state transforms mean/vel/scale & inflates covariance on flicks
+    kf = NSAKalmanFilter()
+    mean0, cov0 = kf.initiate(np.array([200.0, 150.0, 0.5, 80.0]))
+    mean0[4] = 10.0  # vx
+    mean0[5] = 0.0   # vy
+    mean0[7] = 2.0   # vh
+
+    # 90-degree rotation + 1.5x scale + small shift (< flick_thresh)
+    theta = np.pi / 2.0
+    scale = 1.5
+    h_small = np.array(
+        [
+            [scale * np.cos(theta), -scale * np.sin(theta), 10.0],
+            [scale * np.sin(theta), scale * np.cos(theta), 5.0],
+        ],
+        dtype=np.float32,
+    )
+    m_rot, c_rot = warp_kalman_state(mean0, cov0, h_small, flick_thresh_px=40.0)
+    assert np.allclose(c_rot, c_rot.T)
+    assert m_rot[0] == pytest.approx(-150.0 * scale + 10.0, abs=1e-4)
+    assert m_rot[1] == pytest.approx(200.0 * scale + 5.0, abs=1e-4)
+    assert m_rot[3] == pytest.approx(80.0 * scale, abs=1e-4)
+    assert m_rot[4] == pytest.approx(0.0, abs=1e-4)
+    assert m_rot[5] == pytest.approx(10.0 * scale, abs=1e-4)
+    assert m_rot[7] == pytest.approx(2.0 * scale, abs=1e-4)
+
+    # Pure translation flick (>= flick_thresh) inflates pos/vel variances
+    h_flick = np.array([[1.0, 0.0, 55.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    h_mild = np.array([[1.0, 0.0, 5.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    _, c_mild = warp_kalman_state(mean0, cov0, h_mild, flick_thresh_px=40.0)
+    m_flick, c_flick = warp_kalman_state(mean0, cov0, h_flick, flick_thresh_px=40.0)
+    assert m_flick[0] == pytest.approx(255.0)
+    assert c_flick[0, 0] > c_mild[0, 0] + 20.0
+    assert c_flick[4, 4] > c_mild[4, 4] + 1.0
+
+
+def test_bytetrack_gmc_zero_id_switch_across_camera_pans_and_flick():
+    import cv2
+
+    bg = _make_textured_canvas(2000, 720, seed=99)
+    view_w, view_h = 640, 480
+
+    # Camera pans left 50 px/frame across frames 1..7, then flicks +65 px with blur at frame 8
+    cam_xs = [900 - i * 50 for i in range(7)] + [900 - 6 * 50 - 65, 900 - 6 * 50 - 80]
+
+    # World coordinates of a small car (width=46, height=64) stationary in world space
+    world_car = (1020.0, 220.0, 46.0, 64.0)
+    world_person = (1140.0, 260.0, 32.0, 72.0)
+
+    def build_frame_and_dets(cam_x: int, blur: bool = False):
+        crop = bg[120 : 120 + view_h, cam_x : cam_x + view_w].copy()
+        if blur:
+            crop = cv2.GaussianBlur(crop, (21, 1), 0)
+        dets = []
+        for idx, (wx, wy, bw, bh, cls_id, cls_name, color) in enumerate(
+            [
+                (*world_car, 2, "car", (40, 180, 250)),
+                (*world_person, 0, "person", (220, 90, 60)),
+            ]
+        ):
+            x1 = wx - cam_x
+            y1 = wy - 120.0
+            x2 = x1 + bw
+            y2 = y1 + bh
+            cv2.rectangle(crop, (int(x1), int(y1)), (int(x2), int(y2)), color, -1)
+            dets.append(Detection([x1, y1, x2, y2], 0.92, cls_id, cls_name))
+        return crop, dets
+
+    # Without GMC: +50 px pan breaks narrow boxes -> ID switches / drops
+    tracker_no_gmc = ByteTracker(
+        ByteTrackerConfig(use_gmc=False, use_lazy_appearance=False)
+    )
+    seen_ids_no_gmc = set()
+    for f_idx, cx in enumerate(cam_xs, start=1):
+        frame, dets = build_frame_and_dets(cx, blur=(f_idx == 8))
+        tracks = tracker_no_gmc.update(dets, frame_id=f_idx, frame=frame)
+        seen_ids_no_gmc.update(t.track_id for t in tracks)
+    assert len(seen_ids_no_gmc) > 2
+
+    # With GMC hybrid (handles pans + blurred flick fallback): zero ID switches!
+    tracker_gmc = ByteTracker(
+        ByteTrackerConfig(
+            use_gmc=True,
+            gmc_method="hybrid",
+            gmc_downscale=2,
+            gmc_flick_thresh_px=40.0,
+            use_lazy_appearance=False,
+        )
+    )
+    seen_ids_gmc = set()
+    shifts = []
+    for f_idx, cx in enumerate(cam_xs, start=1):
+        frame, dets = build_frame_and_dets(cx, blur=(f_idx == 8))
+        tracks = tracker_gmc.update(dets, frame_id=f_idx, frame=frame)
+        assert len(tracks) == 2
+        seen_ids_gmc.update(t.track_id for t in tracks)
+        shifts.append(tracker_gmc.last_gmc_shift_px)
+
+    assert seen_ids_gmc == {1, 2}
+    assert max(shifts[1:]) >= 45.0
+
+
+def test_lazy_hsv_single_conversion_and_cache_speed(monkeypatch):
+    import time
+    import cv2
+
+    cvt_calls = []
+    real_cvt = cv2.cvtColor
+
+    def counted_cvt(src, code, *args, **kwargs):
+        if code == cv2.COLOR_BGR2HSV:
+            cvt_calls.append(src.shape[:2])
+        return real_cvt(src, code, *args, **kwargs)
+
+    monkeypatch.setattr(cv2, "cvtColor", counted_cvt)
+
+    # 1080p dense scene with 12 targets (8 separated + 2 overlapping pair at y=460)
+    frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    dets = []
+    for i in range(10):
+        x1 = 80 + (i % 5) * 300
+        y1 = 80 + (i // 5) * 320
+        x2, y2 = x1 + 90, y1 + 180
+        frame[y1:y2, x1:x2] = ((i * 37) % 255, (i * 83) % 255, 200)
+        dets.append(Detection([x1, y1, x2, y2], 0.9, 0, "person"))
+    # Pair of tightly overlapping targets at Frame 2 (dx=4px) triggering ambiguity
+    for k, (x1, y1, col) in enumerate(
+        [(200, 720, (0, 0, 255)), (204, 722, (255, 0, 0))]
+    ):
+        x2, y2 = x1 + 90, y1 + 180
+        frame[y1:y2, x1:x2] = col
+        dets.append(Detection([x1, y1, x2, y2], 0.9, 0, "person"))
+
+    cfg = ByteTrackerConfig.full_enhanced()
+    cfg.appearance_update_interval = 10
+    tracker = ByteTracker(cfg)
+
+    # Frame 1: initial template extraction across 12 targets -> AT MOST 1 downsampled BGR2HSV call!
+    tracker.update(dets, frame_id=1, frame=frame)
+    assert len(cvt_calls) == 1
+    assert max(cvt_calls[0]) <= 640
+
+    # Frame 2 (ambiguous overlapping pair triggers Stage-1 LazyHSV) -> AT MOST 1 downsampled BGR2HSV call!
+    cvt_calls.clear()
+    tracker.update(dets, frame_id=2, frame=frame)
+    assert len(cvt_calls) == 1
+    assert max(cvt_calls[0]) <= 640
+    assert tracker.lazy_appearance_calls >= 1
+
+    # Frame 3 with only separated targets & non-refresh frame -> ZERO BGR2HSV calls!
+    cvt_calls.clear()
+    tracker.update(dets[:10], frame_id=3, frame=frame)
+    assert len(cvt_calls) == 0
+
+    # Verify downsampled HSV cache matches full-res cosine similarity and is fast
+    monkeypatch.undo()
+    hsv_cache = prepare_downsampled_hsv(frame, max_dim=640)
+    t0 = time.perf_counter()
+    for _ in range(5):
+        c_once = prepare_downsampled_hsv(frame, max_dim=640)
+        feats_cached = [extract_hsv_histogram_from_hsv(c_once, d.bbox) for d in dets]
+    cached_ms = (time.perf_counter() - t0) * 1000.0
+    feats_direct = [extract_hsv_histogram(frame, d.bbox) for d in dets]
+    for fc, fd in zip(feats_cached, feats_direct):
+        assert fc is not None and fd is not None
+        assert float(np.dot(fc, fd)) > 0.95
+    assert cached_ms < 500.0
