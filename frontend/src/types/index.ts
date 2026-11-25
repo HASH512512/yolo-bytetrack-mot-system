@@ -2,7 +2,7 @@ export type TaskStatus = 'idle' | 'running' | 'paused' | 'stopped' | 'error';
 export type ViolationType = 'wrong_way' | 'wrong-way' | 'intrusion' | 'loitering';
 export type ZoneType = 'intrusion' | 'lane' | 'loitering';
 export type DetectorType = 'mock' | 'yolo' | 'onnx' | 'tensorrt';
-export type ActiveTab = 'monitoring' | 'tracks' | 'violations' | 'ablation';
+export type ActiveTab = 'monitoring' | 'tracks' | 'tasks' | 'violations' | 'ablation';
 
 export interface StreamConfig {
   video_source: string;

@@ -5,12 +5,8 @@
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 class="text-base font-bold text-slate-100 flex items-center gap-2">
-            <span>&#x1F50D;</span>
-            <span>历史轨迹检索与 2D 时空回放</span>
+            查询条件
           </h2>
-          <p class="text-xs text-slate-400 mt-0.5">
-            <span>基于 SQLite WAL 复合索引检索持久化目标轨迹，支持按任务、Track ID 与目标类别过滤回放。</span>
-          </p>
         </div>
         <span class="badge badge-blue text-xs">
           <span>{{ displaySummaries.length }} 条轨迹摘要 &middot; {{ replayPoints.length }} 个轨迹点</span>
@@ -19,7 +15,7 @@
 
       <form @submit.prevent="handleQuery" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3 text-xs pt-1">
         <div class="lg:col-span-4">
-          <label class="block text-slate-400 mb-1">监控任务 (Task)</label>
+          <label class="block text-slate-400 mb-1">监控任务</label>
           <select
             v-model.number="selectedTaskId"
             class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
@@ -32,18 +28,18 @@
         </div>
 
         <div class="lg:col-span-2">
-          <label class="block text-slate-400 mb-1">Track ID (可选)</label>
+          <label class="block text-slate-400 mb-1">目标编号（可选）</label>
           <input
             v-model="trackIdInput"
             type="number"
             min="1"
-            placeholder="全部 ID (All)"
+            placeholder="全部目标"
             class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
           />
         </div>
 
         <div class="lg:col-span-3">
-          <label class="block text-slate-400 mb-1">目标类别 (Class)</label>
+          <label class="block text-slate-400 mb-1">目标类别</label>
           <select
             v-model="classFilter"
             class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
@@ -325,10 +321,11 @@ watch(
 );
 
 const displaySummaries = computed<TrackSummary[]>(() => {
+  if (!selectedTaskId.value || store.tracksTaskId !== selectedTaskId.value) return [];
   return cachedSummaries.value.length > 0 ? cachedSummaries.value : store.trackSummaries;
 });
 
-const replayPoints = computed<TrackPoint[]>(() => store.trackPoints);
+const replayPoints = computed<TrackPoint[]>(() => store.tracksTaskId === selectedTaskId.value ? store.trackPoints : []);
 
 const currentPoint = computed<TrackPoint | null>(() => {
   if (replayPoints.value.length === 0) return null;

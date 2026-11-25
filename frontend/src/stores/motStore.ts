@@ -24,12 +24,23 @@ export interface FetchTracksParams {
   limit?: number;
 }
 
+async function getResponseError(response: Response, fallback: string): Promise<string> {
+  const body = await response.json().catch(() => null);
+  if (typeof body?.detail === 'string') return body.detail;
+  if (Array.isArray(body?.detail)) {
+    const messages = body.detail.map((item) => item?.msg).filter(Boolean);
+    if (messages.length) return messages.join('；');
+  }
+  return fallback + ' (HTTP ' + response.status + ')';
+}
+
 export const useMotStore = defineStore('mot', {
   state: () => ({
     tasks: [] as Task[],
     activeTaskId: null as number | null,
     zones: [] as Zone[],
     violations: [] as ViolationEvent[],
+    recentViolationsByTask: {} as Record<number, ViolationEvent[]>,
     currentFrame: null as TrackFrame | null,
     systemMetrics: {
       fps: 0,
@@ -109,18 +120,20 @@ export const useMotStore = defineStore('mot', {
 
   actions: {
     _ingestFrameViolations(frame: TrackFrame) {
-      if (frame.active_violations && frame.active_violations.length > 0) {
-        for (const v of frame.active_violations) {
-          const exists = this.violations.some(
-            (item) =>
-              item.task_id === v.task_id &&
-              item.track_id === v.track_id &&
-              item.frame_id === v.frame_id &&
-              item.violation_type === v.violation_type
-          );
-          if (!exists) {
-            this.violations.unshift(v);
-          }
+      const incoming = frame.active_violations ?? [];
+      const recent = this.recentViolationsByTask[frame.task_id] ?? [];
+      if (recent.length || incoming.length) {
+        const incomingIds = new Set(incoming.map((event) => event.id));
+        this.recentViolationsByTask[frame.task_id] = [...incoming, ...recent.filter((event) =>
+          event.frame_id <= frame.frame_id &&
+          event.timestamp <= frame.timestamp &&
+          frame.timestamp - event.timestamp < 3 &&
+          !incomingIds.has(event.id),
+        )];
+      }
+      for (const event of incoming) {
+        if (!this.violations.some((saved) => saved.id === event.id)) {
+          this.violations.unshift(event);
         }
       }
     },
@@ -139,7 +152,7 @@ export const useMotStore = defineStore('mot', {
       }
     },
 
-    async createTask(payload: { name: string; video_source: string; config?: any }) {
+    async createTask(payload: { name: string; video_source: string; config?: Partial<StreamConfig> }) {
       this.taskError = null;
       try {
         const res = await fetch('/api/tasks', {
@@ -153,10 +166,27 @@ export const useMotStore = defineStore('mot', {
           this.setActiveTask(newTask.id);
           return newTask;
         }
-        const errBody = await res.json().catch(() => null);
-        this.taskError = errBody?.detail || `创建任务失败 (HTTP ${res.status})`;
+        this.taskError = await getResponseError(res, '创建任务失败');
       } catch (err) {
         console.error('Failed to create task:', err);
+        this.taskError = String(err);
+      }
+      return null;
+    },
+
+    async prepareViolationDemo() {
+      this.taskError = null;
+      try {
+        const res = await fetch('/api/tasks/violation-demo', { method: 'POST' });
+        if (res.ok) {
+          const task: Task = await res.json();
+          const index = this.tasks.findIndex(({ id }) => id === task.id);
+          if (index === -1) this.tasks.unshift(task);
+          else this.tasks[index] = task;
+          return task;
+        }
+        this.taskError = await getResponseError(res, '无法准备违章演示');
+      } catch (err) {
         this.taskError = String(err);
       }
       return null;
@@ -167,6 +197,7 @@ export const useMotStore = defineStore('mot', {
         const res = await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
         if (res.ok) {
           this.tasks = this.tasks.filter((t) => t.id !== id);
+          delete this.recentViolationsByTask[id];
           if (this._multiWs[id]) {
             try {
               this._multiWs[id].close();
@@ -201,7 +232,7 @@ export const useMotStore = defineStore('mot', {
         if (useExclusive) {
           const othersRunning = this.tasks.filter((t) => t.id !== id && t.status === 'running');
           for (const other of othersRunning) {
-            await this.stopTask(other.id);
+            if (!(await this.stopTask(other.id))) return false;
           }
         }
         const res = await fetch(`/api/tasks/${id}/start`, { method: 'POST' });
@@ -219,23 +250,26 @@ export const useMotStore = defineStore('mot', {
           if (this.multiTaskIds.includes(id)) {
             this.connectTaskWs(id);
           }
+          return true;
         } else {
-          const errBody = await res.json().catch(() => null);
-          this.taskError = errBody?.detail || `启动任务失败 (HTTP ${res.status})`;
+          this.taskError = await getResponseError(res, '启动任务失败');
           await this.fetchTasks();
         }
       } catch (err) {
         console.error('Failed to start task:', err);
         this.taskError = String(err);
       }
+      return false;
     },
 
     async stopTask(id: number) {
+      this.taskError = null;
       try {
         const res = await fetch(`/api/tasks/${id}/stop`, { method: 'POST' });
         if (res.ok) {
           const task = this.tasks.find((t) => t.id === id);
           if (task) task.status = 'stopped';
+          delete this.recentViolationsByTask[id];
 
           if (this.activeTaskId === id) {
             this.disconnectWebSocket();
@@ -275,10 +309,14 @@ export const useMotStore = defineStore('mot', {
               },
             };
           }
+          return true;
         }
+        this.taskError = await getResponseError(res, '停止任务失败');
       } catch (err) {
         console.error('Failed to stop task:', err);
+        this.taskError = String(err);
       }
+      return false;
     },
 
     setActiveTask(id: number) {
@@ -371,12 +409,12 @@ export const useMotStore = defineStore('mot', {
 
     async fetchViolations() {
       try {
-        const url = this.activeTaskId
-          ? `/api/violations?task_id=${this.activeTaskId}&limit=100`
-          : '/api/violations?limit=100';
+        const taskId = this.activeTaskId;
+        const url = taskId ? `/api/violations?task_id=${taskId}&limit=100` : '/api/violations?limit=100';
         const res = await fetch(url);
         if (res.ok) {
-          this.violations = await res.json();
+          const violations: ViolationEvent[] = await res.json();
+          if (taskId === this.activeTaskId) this.violations = violations;
         }
       } catch (err) {
         console.error('Failed to fetch violations:', err);
@@ -479,10 +517,12 @@ export const useMotStore = defineStore('mot', {
             datasets: data.datasets || [],
             weights: data.weights || [],
           };
+          return true;
         }
       } catch (err) {
         console.error('Failed to fetch local assets:', err);
       }
+      return false;
     },
 
     async fetchLockedBenchmarks() {
@@ -503,6 +543,8 @@ export const useMotStore = defineStore('mot', {
     connectWebSocket(taskId: number) {
       this.disconnectWebSocket();
 
+      this.currentFrame = null;
+      this.wsError = null;
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/ws/stream/${taskId}`;
 
@@ -511,12 +553,13 @@ export const useMotStore = defineStore('mot', {
         this._ws = ws;
 
         ws.onopen = () => {
+          if (this._ws !== ws) return;
           this.wsConnected = true;
           this.wsError = null;
         };
 
         ws.onmessage = (event) => {
-          if (event.data === 'pong') return;
+          if (this._ws !== ws || event.data === 'pong') return;
           try {
             const frame: TrackFrame = JSON.parse(event.data);
             if ((frame as any).error) {
@@ -535,7 +578,8 @@ export const useMotStore = defineStore('mot', {
         };
 
         ws.onerror = () => {
-          this.wsError = 'WebSocket connection error';
+          if (this._ws !== ws) return;
+          this.wsError = '无法连接跟踪数据';
           this.wsConnected = false;
         };
 

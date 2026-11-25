@@ -1,283 +1,257 @@
 <template>
-  <div class="space-y-4">
-    <!-- Top Metrics & Quick Controls Bar -->
-    <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
-      <div class="card flex flex-col justify-between">
-        <span class="text-xs text-slate-400 font-medium">实时推理帧率 (FPS)</span>
-        <div class="flex items-baseline gap-2 mt-1">
-          <span class="text-2xl font-bold text-cyan-400">{{ primaryMetrics.fps.toFixed(1) }}</span>
-          <span class="text-xs text-slate-500">Hz</span>
-        </div>
-        <div class="w-full bg-slate-700 h-1.5 rounded-full mt-2 overflow-hidden">
-          <div
-            class="bg-cyan-400 h-full rounded-full transition-all duration-300"
-            :style="{ width: `${Math.min(100, (primaryMetrics.fps / 150) * 100)}%` }"
-          ></div>
-        </div>
+  <div class="monitor-page">
+    <header class="workspace-heading monitor-heading">
+      <div>
+        <h1>实时监控</h1>
+        <p>选择视频，在画面上查看目标、轨迹和区域异常。</p>
       </div>
-
-      <div class="card flex flex-col justify-between">
-        <span class="text-xs text-slate-400 font-medium">P95 端到端延迟</span>
-        <div class="flex items-baseline gap-2 mt-1">
-          <span class="text-2xl font-bold text-emerald-400">
-            {{ primaryMetrics.p95_latency_ms.toFixed(1) }}
-          </span>
-          <span class="text-xs text-slate-500">ms</span>
-        </div>
-        <div class="flex items-center justify-between text-[11px] text-slate-400 mt-2">
-          <span>平均 {{ primaryMetrics.avg_latency_ms.toFixed(1) }} ms</span>
-          <span>丢帧 {{ primaryMetrics.drop_count }}</span>
-        </div>
+      <div class="workspace-actions">
+        <button type="button" class="btn btn-secondary" :disabled="taskActionBusy || savingConfig" @click="startDemo">
+          试用违章演示
+        </button>
+        <button type="button" class="btn btn-primary" :disabled="taskActionBusy || savingConfig" @click="sourceDialog?.open()">
+          选择视频
+        </button>
       </div>
+    </header>
 
-      <div class="card flex flex-col justify-between">
-        <span class="text-xs text-slate-400 font-medium">当前跟踪目标数</span>
-        <div class="flex items-baseline gap-2 mt-1">
-          <span class="text-2xl font-bold text-indigo-400">{{ primaryTracksCount }}</span>
-          <span class="text-xs text-slate-500">tracks</span>
-        </div>
-        <div class="flex items-center justify-between text-[11px] text-slate-400 mt-2">
-          <span>缓存 {{ primaryMetrics.queue_size }} 帧</span>
-          <span>活跃流 {{ primaryMetrics.active_streams ?? activeStreamsFallback }}</span>
-        </div>
-      </div>
+    <VideoSourceDialog ref="sourceDialog" @started="focusTask" />
 
-      <div class="card flex flex-col justify-between">
-        <span class="text-xs text-slate-400 font-medium">活跃违章报警</span>
-        <div class="flex items-baseline gap-2 mt-1">
-          <span
-            class="text-2xl font-bold"
-            :class="activeViolationsCount > 0 ? 'text-rose-500 animate-pulse' : 'text-slate-400'"
-          >
-            {{ activeViolationsCount }}
-          </span>
-          <span class="text-xs text-slate-500">件</span>
-        </div>
-        <span class="text-[11px] text-slate-400 mt-2">
-          未确认违章: {{ store.unacknowledgedViolations.length }}
-        </span>
-      </div>
+    <p v-if="store.taskError" class="workspace-error" role="alert">{{ store.taskError }}</p>
 
-      <div class="card flex flex-col justify-between col-span-2 md:col-span-1">
-        <span class="text-xs text-slate-400 font-medium">流水线各阶段耗时</span>
-        <div class="space-y-1 mt-1 text-[11px]">
-          <div class="flex justify-between">
-            <span class="text-slate-400">解码/前处理</span>
-            <span class="text-slate-200">{{ primaryMetrics.stage_latency.decode_ms.toFixed(1) }} ms</span>
+    <div class="monitor-grid">
+      <section class="monitor-stage" aria-labelledby="video-heading">
+        <header class="monitor-toolbar">
+          <div class="min-w-0">
+            <h2 id="video-heading">视频预览</h2>
+            <p class="monitor-source" :title="store.activeTask?.video_source">{{ sourceLabel }}</p>
           </div>
-          <div class="flex justify-between">
-            <span class="text-slate-400">检测推理</span>
-            <span class="text-amber-400">{{ primaryMetrics.stage_latency.detect_ms.toFixed(1) }} ms</span>
-          </div>
-          <div class="flex justify-between">
-            <span class="text-slate-400">ByteTrack 关联</span>
-            <span class="text-cyan-400">{{ primaryMetrics.stage_latency.track_ms.toFixed(1) }} ms</span>
-          </div>
-          <div class="flex justify-between">
-            <span class="text-slate-400">规则引擎判定</span>
-            <span class="text-emerald-400">{{ primaryMetrics.stage_latency.rules_ms.toFixed(1) }} ms</span>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Homepage Demo Task Start/Stop Control Bar (All Default OFF) -->
-    <div class="card p-3 flex flex-wrap items-center justify-between gap-3 bg-slate-900/90 border border-slate-800">
-      <div class="flex items-center gap-2.5">
-        <span class="text-sm font-semibold text-slate-100">&#x1F3AC; Demo 任务启停控制</span>
-        <span class="text-[11px] text-slate-400">（默认全部关闭，演示时手动点击开启）</span>
-      </div>
-
-      <div class="flex flex-wrap items-center gap-2.5">
-        <div
-          v-for="t in store.tasks"
-          :key="t.id"
-          class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border text-xs transition-colors"
-          :class="
-            t.status === 'running'
-              ? 'bg-emerald-950/35 border-emerald-500/40 text-slate-100'
-              : t.id === store.activeTaskId
-                ? 'bg-slate-800/90 border-indigo-500/40 text-slate-200'
-                : 'bg-slate-950/70 border-slate-800 text-slate-300'
-          "
-        >
-          <button
-            @click="handleSelectDemoTask(t.id)"
-            class="flex items-center gap-1.5 text-left hover:text-white"
-            :title="`切换主监控画面至 ${t.name}`"
-          >
-            <span
-              class="w-2 h-2 rounded-full"
-              :class="
-                t.status === 'running'
-                  ? 'bg-emerald-400 animate-pulse'
-                  : t.status === 'error'
-                    ? 'bg-rose-500'
-                    : 'bg-slate-500'
-              "
-            ></span>
-            <span class="font-medium">{{ t.name }}</span>
-            <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-900/80 text-slate-400 uppercase">
-              {{ t.config?.detector_type || 'yolo' }}
-            </span>
-          </button>
-
-          <button
-            v-if="t.status === 'running'"
-            @click="handleStopTaskById(t.id)"
-            class="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-medium transition-colors"
-          >
-            关闭
-          </button>
-          <button
-            v-else
-            @click="handleStartTaskById(t.id)"
-            class="px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-medium transition-colors"
-          >
-            开启
-          </button>
-        </div>
-
-        <label
-          class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-950/60 border border-slate-800 text-xs text-slate-300 cursor-pointer"
-          title="开启某个 Demo 任务时自动关闭其他正在运行的任务，防止双路并发导致推理卡顿"
-        >
-          <input
-            type="checkbox"
-            v-model="store.singleStreamExclusive"
-            class="accent-indigo-500 w-3.5 h-3.5"
-          />
-          <span>单路互斥防卡顿</span>
-        </label>
-      </div>
-    </div>
-
-    <!-- Main Video & Vector Overlay Area -->
-    <div class="card p-3 relative bg-slate-950 overflow-hidden space-y-3">
-      <!-- Header Status Badges, Layout Switcher & Layer Toggles -->
-      <div class="flex flex-wrap items-center justify-between gap-3 px-1">
-        <!-- Left Status Badges -->
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="text-sm font-semibold text-slate-200">
-            {{ store.activeTask ? store.activeTask.name : '未选择任务' }}
-          </span>
-
-          <!-- Real vs Mock Demo Simulation Badge -->
-          <span
-            v-if="isPrimaryDemoSimulation"
-            class="badge badge-amber text-[11px] gap-1"
-            title="当前使用 Mock 检测器或离线演示仿真流 (Mock)"
-          >
-            <span>&#x26A0;&#xFE0F;</span>
-            <span>离线仿真演示 (Mock)</span>
-          </span>
-          <span
-            v-else
-            class="badge badge-green text-[11px] gap-1"
-            title="当前执行真实视频解码与模型推理 (Real)"
-          >
-            <span>&#x2705;</span>
-            <span>真实视频推理</span>
-          </span>
-
-          <!-- Adaptive Keyframe Detection Badge -->
-          <span
-            class="badge text-[11px] gap-1"
-            :class="primaryIsKeyframe ? 'badge-blue' : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'"
-          >
-            <span>{{ primaryIsKeyframe ? '\u{1F3AF} 关键帧检测' : '\u26A1 卡尔曼补帧' }}</span>
-            <span class="opacity-80">&middot; 跳过率: {{ primarySkipRatioPct }}%</span>
-          </span>
-
-          <!-- Hardware / TensorRT / FP16 / ROI Status Badges -->
-          <span
-            v-if="store.activeTask?.config?.detector_type !== 'mock'"
-            class="badge text-[11px] gap-1"
-            :class="isCudaActive ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30' : 'badge-gray'"
-          >
-            <span>
-              {{
-                store.activeTask?.config?.detector_type === 'tensorrt'
-                  ? 'TensorRT GPU'
-                  : isCudaActive
-                    ? 'CUDA'
-                    : 'CPU'
-              }}
-            </span>
-            <span v-if="store.activeTask?.config?.detector_type === 'tensorrt'">&middot; 零拷贝预处理</span>
-            <span v-else-if="isCudaActive && store.activeTask?.config?.half_precision !== false">&middot; FP16</span>
-          </span>
-
-          <span
-            class="badge text-[11px]"
-            :class="isRoiRulesEnabled ? 'badge-amber' : 'badge-gray'"
-          >
-            {{ isRoiRulesEnabled ? 'ROI检测: 开启' : 'ROI检测: 关闭' }}
-          </span>
-
-          <!-- WebSocket Status -->
-          <span
-            v-if="store.wsConnected"
-            class="badge badge-green flex items-center gap-1 text-[10px]"
-          >
-            <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
-            <span>实时推流中</span>
-          </span>
-          <span v-else class="badge badge-gray text-[10px]">
-            <span>WS 未连接</span>
-          </span>
-        </div>
-
-        <!-- Right Controls: Layout Switcher + Settings Trigger -->
-        <div class="flex flex-wrap items-center gap-2.5">
-          <!-- Layout Switcher -->
-          <div class="flex items-center gap-1 bg-slate-800 p-1 rounded-lg border border-slate-700/60 text-xs">
+          <div class="monitor-toolbar-actions">
+            <label class="monitor-task-picker">
+              <span class="sr-only">选择已有任务</span>
+              <select class="workspace-field" :title="store.activeTask?.name" :value="store.activeTaskId ?? ''" :disabled="taskActionBusy || savingConfig" @change="handleTaskChange">
+                <option value="" disabled>选择已有任务</option>
+                <option v-for="task in store.tasks" :key="task.id" :value="task.id">{{ task.name }}</option>
+              </select>
+            </label>
             <button
-              v-for="opt in layoutOptions"
-              :key="opt.value"
-              @click="layoutMode = opt.value"
-              class="px-2.5 py-1 rounded-md transition-colors font-medium"
-              :class="
-                layoutMode === opt.value
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              "
+              v-if="store.activeTask"
+              type="button"
+              class="btn"
+              :class="isRunning ? 'btn-secondary' : 'btn-primary'"
+              :disabled="taskActionBusy || savingConfig"
+              @click="toggleTracking"
             >
-              {{ opt.label }}
+              {{ taskActionBusy ? '处理中…' : isRunning ? '停止跟踪' : '开始跟踪' }}
             </button>
           </div>
+        </header>
 
-          <button
-            @click="showSettingsPanel = !showSettingsPanel"
-            class="btn text-xs py-1.5 px-3 border"
-            :class="
-              showSettingsPanel
-                ? 'bg-indigo-600 text-white border-indigo-500'
-                : 'bg-slate-800 text-slate-200 border-slate-700 hover:bg-slate-700'
-            "
+        <!-- Multi-Pane Video Grid -->
+        <div
+          class="monitor-video-grid grid gap-2"
+          :class="layoutMode === '1x1' ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'"
+        >
+          <div
+            v-for="(paneTaskId, paneIdx) in visiblePaneTaskIds"
+            :key="`pane-${paneIdx}`"
+            class="rounded-lg border border-slate-800 bg-slate-950 overflow-hidden flex flex-col"
           >
-            <span>&#x2699;&#xFE0F; 画面与检测设置</span>
-          </button>
-        </div>
-      </div>
+            <!-- Per-Pane Toolbar -->
+            <div
+              v-if="layoutMode !== '1x1'"
+              class="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 bg-slate-900 border-b border-slate-800 text-xs"
+            >
+              <div class="flex items-center gap-2">
+                <span class="text-[11px] font-mono text-slate-400">#{{ paneIdx + 1 }}</span>
+                <select
+                  :value="paneTaskId ?? ''"
+                  @change="(e) => handlePaneTaskChange(paneIdx, e)"
+                  :aria-label="`分屏 ${paneIdx + 1} 的任务`"
+                  class="bg-slate-800 border border-slate-700 rounded px-2 py-0.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 max-w-[200px]"
+                >
+                  <option value="">-- 选择监控任务 --</option>
+                  <option v-for="t in store.tasks" :key="t.id" :value="t.id">
+                    {{ t.name }} ({{ formatTaskStatus(t.status) }})
+                  </option>
+                </select>
+              </div>
 
-      <!-- Collapsible Settings Panel -->
-      <div
-        v-if="showSettingsPanel"
-        class="rounded-xl border border-slate-700/80 bg-slate-900/95 p-4 space-y-4 text-xs shadow-lg"
-      >
-        <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
-          <div class="flex items-center gap-2">
-            <span class="font-semibold text-slate-100 text-sm">推理性能、ROI 区域检测与画布显示设置</span>
-            <span class="text-slate-400">(修改运行参数将自动平滑重载当前任务流水线)</span>
+              <div class="flex flex-wrap items-center gap-1.5 text-[10px]">
+                <span
+                  v-if="paneTaskId"
+                  class="badge py-0.5 px-1.5"
+                  :class="isPaneDemo(paneTaskId) ? 'badge-amber' : 'badge-green'"
+                >
+                  {{ isPaneDemo(paneTaskId) ? '仿真Mock' : '真实推理' }}
+                </span>
+                <span
+                  v-if="paneTaskId"
+                  class="badge py-0.5 px-1.5"
+                  :class="getPaneFrame(paneTaskId)?.is_keyframe === false ? 'badge-blue' : 'badge-gray'"
+                >
+                  {{ getPaneFrame(paneTaskId)?.is_keyframe === false ? '卡尔曼补帧' : '关键帧' }}
+                  ({{ (((getPaneFrame(paneTaskId)?.metrics?.detect_skip_ratio ?? 0) * 100)).toFixed(0) }}%)
+                </span>
+                <span v-if="getPaneFrame(paneTaskId)" class="text-teal-300 font-mono">
+                  处理均速 {{ (getPaneFrame(paneTaskId)?.metrics?.fps ?? 0).toFixed(1) }} 帧/秒
+                </span>
+              </div>
+            </div>
+
+            <!-- MJPEG Underlay + Transparent Vector Canvas Overlay -->
+            <div class="monitor-viewport">
+              <template v-if="paneTaskId">
+                <!-- Real MJPEG Underlay -->
+                <img
+                  v-if="shouldShowVideoFeed(paneTaskId)"
+                  :src="videoFeedUrl(paneTaskId, paneIdx)"
+                  class="w-full h-full object-contain block select-none"
+                  alt="正在跟踪的视频画面"
+                  @load="onImgLoad(paneTaskId)"
+                  @error="onImgError(paneTaskId)"
+                />
+
+                <div
+                  v-if="!shouldShowVideoFeed(paneTaskId) || mjpegErrored[paneTaskId] || !mjpegReady[paneTaskId]"
+                  class="monitor-placeholder"
+                >
+                  <span class="monitor-placeholder-icon" aria-hidden="true"></span>
+                  <strong>{{ previewTitle(paneTaskId) }}</strong>
+                  <span>{{ previewHint(paneTaskId) }}</span>
+                </div>
+
+                <!-- Transparent Vector Canvas Overlay -->
+                <canvas
+                  :ref="(el) => setCanvasRef(paneIdx, el)"
+                  :width="getFrameWidth(paneTaskId)"
+                  :height="getFrameHeight(paneTaskId)"
+                  class="absolute inset-0 w-full h-full object-contain pointer-events-none block"
+                ></canvas>
+
+                <!-- Active Violation Alert Toast on Primary / Single View -->
+                <transition-group
+                  v-if="paneIdx === 0"
+                  name="fade"
+                  tag="div"
+                  class="absolute top-3 right-3 flex flex-col gap-2 max-w-sm pointer-events-none"
+                >
+                  <div
+                    v-for="v in getPaneViolations(paneTaskId)"
+                    :key="v.id ?? `${v.track_id}-${v.frame_id}-${v.violation_type}`"
+                    class="bg-rose-950/90 border border-rose-500 text-rose-200 text-xs px-3 py-2 rounded-lg shadow-lg backdrop-blur alert-pulse pointer-events-auto flex items-start gap-2"
+                  >
+                    <span class="text-base">&#x1F6A8;</span>
+                    <div class="flex-1">
+                      <div class="font-bold flex items-center justify-between gap-2">
+                        <span>{{ formatViolationTitle(v.violation_type) }}</span>
+                        <span class="text-[10px] text-rose-400">Track #{{ v.track_id }}</span>
+                      </div>
+                      <p class="text-[11px] text-rose-300/90 mt-0.5">
+                        {{ v.details?.note || '检测到异常轨迹行为' }}
+                      </p>
+                    </div>
+                  </div>
+                </transition-group>
+
+                <!-- Compact Violation Pill on Secondary Multi-View Panes -->
+                <div
+                  v-else-if="getPaneViolations(paneTaskId).length > 0"
+                  class="absolute top-2 right-2 bg-rose-950/90 border border-rose-500 text-rose-200 text-[10px] px-2 py-1 rounded shadow pointer-events-none"
+                >
+                  <span>&#x1F6A8; 违章报警 &times;{{ getPaneViolations(paneTaskId).length }}</span>
+                </div>
+              </template>
+
+              <div v-else class="monitor-placeholder">
+                <span class="monitor-placeholder-icon" aria-hidden="true"></span>
+                <strong>{{ layoutMode === '1x1' ? '还没有视频' : '请选择分屏任务' }}</strong>
+                <span>{{ layoutMode === '1x1' ? '请选择视频，或启动模拟演示。' : '从此分屏上方的列表选择任务。' }}</span>
+              </div>
+            </div>
           </div>
-          <span v-if="savingConfig" class="text-cyan-400 font-medium">正在应用配置并重载推流...</span>
+        </div>
+
+        <footer class="monitor-stage-footer">
+          <div class="monitor-signal" :class="{ 'is-active': store.wsConnected && isRunning }">
+            <span aria-hidden="true"></span>{{ connectionLabel }}
+          </div>
+          <div class="workspace-actions">
+            <label class="monitor-layout">
+              <span>分屏</span>
+              <select v-model="layoutMode" class="workspace-field">
+                <option v-for="option in layoutOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+              </select>
+            </label>
+            <button v-if="isRunning" type="button" class="btn btn-secondary" @click="handleReconnect">重新连接</button>
+          </div>
+        </footer>
+      </section>
+
+      <aside class="monitor-summary" aria-label="当前任务概况">
+        <section class="monitor-summary-panel">
+          <div class="monitor-summary-header">
+            <h2>任务概况</h2>
+            <span class="monitor-status" :class="{ 'is-active': isRunning }">{{ statusLabel }}</span>
+          </div>
+          <div class="monitor-task-name" :title="store.activeTask?.name">{{ store.activeTask?.name || '尚未选择任务' }}</div>
+          <p class="monitor-summary-muted" v-if="store.activeTask">
+            {{ isPaneDemo(store.activeTask.id) ? '模拟视频 · Mock 检测' : '真实视频 · ' + detectorLabel }}
+          </p>
+
+          <dl class="monitor-stat-grid">
+            <div class="monitor-stat">
+              <dt>跟踪目标</dt>
+              <dd>{{ activeFrame ? activeFrame.tracks.length : '—' }}</dd>
+            </div>
+            <div class="monitor-stat">
+              <dt>待确认异常</dt>
+              <dd>{{ store.activeTaskId ? pendingViolations : '—' }}</dd>
+            </div>
+          </dl>
+
+          <div class="monitor-summary-meta">
+            <span>画面尺寸</span>
+            <span>{{ activeFrame?.frame_width && activeFrame?.frame_height ? activeFrame.frame_width + ' × ' + activeFrame.frame_height : '—' }}</span>
+          </div>
+          <div class="monitor-summary-meta">
+            <span>区域规则</span>
+            <span>{{ store.activeTask ? (isRoiRulesEnabled ? '已启用' : '已关闭') : '—' }}</span>
+          </div>
+          <div class="monitor-summary-meta">
+            <span>后台处理均速</span>
+            <span>{{ activeFrame ? primaryMetrics.fps.toFixed(1) + ' 帧/秒' : '—' }}</span>
+          </div>
+        </section>
+
+        <section class="monitor-summary-panel monitor-shortcuts">
+          <h2>目标与事件</h2>
+          <button type="button" class="monitor-shortcut" @click="store.activeTab = 'tracks'">
+            <span>查询历史轨迹</span><span aria-hidden="true">↗</span>
+          </button>
+          <button type="button" class="monitor-shortcut" @click="store.activeTab = 'violations'">
+            <span>查看异常事件</span><span aria-hidden="true">↗</span>
+          </button>
+        </section>
+      </aside>
+    </div>
+
+    <details class="monitor-disclosure">
+      <summary>高级设置</summary>
+
+      <div class="monitor-disclosure-body">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <label class="flex items-center gap-2 text-sm text-slate-300">
+            <input v-model="store.singleStreamExclusive" type="checkbox" class="accent-teal-400" />
+            启动新任务时停止其他任务
+          </label>
+          <span v-if="savingConfig" class="text-sm text-teal-300" role="status">正在应用设置…</span>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
           <!-- Column 1: ROI Detection (Default OFF) & Display Layers -->
           <div class="bg-slate-950/60 border border-slate-800 rounded-lg p-3 space-y-2.5">
-            <div class="font-semibold text-slate-200">1. ROI 区域检测（默认关闭）与图层</div>
+            <div class="font-semibold text-slate-200">区域规则与画面图层</div>
             <label class="flex items-center justify-between gap-2 cursor-pointer bg-slate-900 px-2.5 py-2 rounded border border-slate-800">
               <div>
                 <div class="text-slate-100 font-medium">开启 ROI 规则检测与区域显示</div>
@@ -318,26 +292,27 @@
 
           <!-- Column 2: TensorRT / CUDA Hardware, FP16 & Batching -->
           <div class="bg-slate-950/60 border border-slate-800 rounded-lg p-3 space-y-2.5">
-            <div class="font-semibold text-slate-200">2. TensorRT / CUDA 加速与微批大小</div>
+            <div class="font-semibold text-slate-200">模型与推理设备</div>
             <div class="grid grid-cols-3 gap-2">
               <label class="space-y-1">
                 <span class="text-slate-400 block">推理后端</span>
                 <select
                   :value="store.activeTask?.config?.detector_type || 'yolo'"
-                  :disabled="!store.activeTask || savingConfig"
+                  :disabled="!store.activeTask || savingConfig || isPrimarySimulation"
                   @change="handleDetectorTypeChange"
                   class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-100"
                 >
                   <option value="tensorrt">TensorRT (.engine)</option>
                   <option value="yolo">PyTorch YOLO (.pt)</option>
                   <option value="onnx">ONNX Runtime</option>
+                  <option v-if="isPrimarySimulation" value="mock">Mock 演示</option>
                 </select>
               </label>
               <label class="space-y-1">
                 <span class="text-slate-400 block">推理设备</span>
                 <select
                   :value="store.activeTask?.config?.device || 'cuda:0'"
-                  :disabled="!store.activeTask || savingConfig"
+                  :disabled="!store.activeTask || savingConfig || isPrimarySimulation"
                   @change="(e) => applyActiveConfig({ device: (e.target as HTMLSelectElement).value })"
                   class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-100"
                 >
@@ -365,7 +340,7 @@
               <input
                 type="checkbox"
                 :checked="store.activeTask?.config?.half_precision !== false"
-                :disabled="!store.activeTask || savingConfig"
+                :disabled="!store.activeTask || savingConfig || isPrimarySimulation"
                 @change="(e) => applyActiveConfig({ half_precision: (e.target as HTMLInputElement).checked })"
                 class="accent-emerald-500 w-4 h-4"
               />
@@ -374,7 +349,7 @@
 
           <!-- Column 3: Playback Speed Mode, FPS Cap & Adaptive Keyframe Skip -->
           <div class="bg-slate-950/60 border border-slate-800 rounded-lg p-3 space-y-2.5">
-            <div class="font-semibold text-slate-200">3. 播放速度策略与自适应跳帧</div>
+            <div class="font-semibold text-slate-200">播放与检测频率</div>
             <div class="grid grid-cols-3 gap-2">
               <label class="space-y-1">
                 <span class="text-slate-400 block">播放节奏</span>
@@ -384,7 +359,7 @@
                   @change="(e) => applyActiveConfig({ playback_mode: (e.target as HTMLSelectElement).value as 'native' | 'uncapped' })"
                   class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-100"
                 >
-                  <option value="native">固定原速 (按源帧率)</option>
+                  <option value="native">按源帧率读取</option>
                   <option value="uncapped">全速压测 (吞吐优先)</option>
                 </select>
               </label>
@@ -396,7 +371,7 @@
                   @change="(e) => applyActiveConfig({ fps: Number((e.target as HTMLSelectElement).value) })"
                   class="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-slate-100 disabled:opacity-50"
                 >
-                  <option :value="0">不限速 (300+ FPS)</option>
+                  <option :value="0">不限速</option>
                   <option :value="30">30 FPS</option>
                   <option :value="60">60 FPS</option>
                   <option :value="120">120 FPS</option>
@@ -431,322 +406,147 @@
           </div>
         </div>
       </div>
+    </details>
 
-      <!-- Multi-Pane Video Grid -->
-      <div
-        class="grid gap-3"
-        :class="layoutMode === '1x1' ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'"
-      >
-        <div
-          v-for="(paneTaskId, paneIdx) in visiblePaneTaskIds"
-          :key="`pane-${paneIdx}`"
-          class="rounded-lg border border-slate-800 bg-slate-900/70 overflow-hidden flex flex-col"
-        >
-          <!-- Per-Pane Toolbar -->
-          <div
-            v-if="layoutMode !== '1x1'"
-            class="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 bg-slate-900 border-b border-slate-800 text-xs"
-          >
+    <details class="monitor-disclosure">
+      <summary>性能详情</summary>
+      <div class="monitor-disclosure-body">
+        <p class="monitor-summary-muted">
+          后台处理均速按任务启动后的处理帧数计算，包含只做跟踪预测的帧。画面刷新率暂未测量。
+        </p>
+        <div v-if="activeFrame" class="monitor-performance">
+          <span>后台处理均速 <strong>{{ primaryMetrics.fps.toFixed(1) }} 帧/秒</strong></span>
+          <span>读帧缓冲丢帧 <strong>{{ primaryMetrics.drop_count }}</strong></span>
+          <span>检测跳过率 <strong>{{ ((primaryMetrics.detect_skip_ratio ?? 0) * 100).toFixed(1) }}%</strong></span>
+          <span>平均处理耗时 <strong>{{ primaryMetrics.avg_latency_ms.toFixed(1) }} ms</strong></span>
+        </div>
+
+        <!-- Real-Time End-to-End Pipeline Latency Breakdown Line Chart -->
+        <div class="monitor-chart">
+          <div class="flex flex-wrap items-center justify-between gap-3">
             <div class="flex items-center gap-2">
-              <span class="text-[11px] font-mono text-slate-400">#{{ paneIdx + 1 }}</span>
-              <select
-                :value="paneTaskId ?? ''"
-                @change="(e) => handlePaneTaskChange(paneIdx, e)"
-                class="bg-slate-800 border border-slate-700 rounded px-2 py-0.5 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 max-w-[200px]"
-              >
-                <option value="">-- 选择监控任务 --</option>
-                <option v-for="t in store.tasks" :key="t.id" :value="t.id">
-                  {{ t.name }} ({{ t.status }})
-                </option>
-              </select>
+              <h3 class="text-sm font-semibold text-slate-100">处理阶段耗时</h3>
+              <span class="text-[11px] text-slate-400">最近 {{ latencyHistory.length }} 次采样</span>
             </div>
 
-            <div class="flex items-center gap-1.5 text-[10px]">
-              <span
-                v-if="paneTaskId"
-                class="badge py-0.5 px-1.5"
-                :class="isPaneDemo(paneTaskId) ? 'badge-amber' : 'badge-green'"
-              >
-                {{ isPaneDemo(paneTaskId) ? '仿真Mock' : '真实推理' }}
+            <div v-if="activeFrame" class="flex flex-wrap items-center gap-3 text-xs">
+              <span class="flex items-center gap-1.5 text-slate-200">
+                <span class="w-3 h-0.5 bg-slate-100 inline-block"></span>
+                <span>总耗时 {{ primaryMetrics.stage_latency.total_ms.toFixed(1) }} ms</span>
               </span>
-              <span
-                v-if="paneTaskId"
-                class="badge py-0.5 px-1.5"
-                :class="getPaneFrame(paneTaskId)?.is_keyframe === false ? 'badge-blue' : 'badge-gray'"
-              >
-                {{ getPaneFrame(paneTaskId)?.is_keyframe === false ? '卡尔曼补帧' : '关键帧' }}
-                ({{ (((getPaneFrame(paneTaskId)?.metrics?.detect_skip_ratio ?? 0) * 100)).toFixed(0) }}%)
+              <span class="flex items-center gap-1.5 text-rose-400">
+                <span class="w-3 h-0.5 border-t border-dashed border-rose-400 inline-block"></span>
+                <span>P95 {{ primaryMetrics.p95_latency_ms.toFixed(1) }} ms</span>
               </span>
-              <span v-if="paneTaskId" class="text-cyan-400 font-mono">
-                {{ (getPaneFrame(paneTaskId)?.metrics?.fps ?? 0).toFixed(1) }} FPS
+              <span class="flex items-center gap-1.5 text-amber-400">
+                <span class="w-3 h-0.5 bg-amber-400 inline-block"></span>
+                <span>检测 {{ primaryMetrics.stage_latency.detect_ms.toFixed(1) }} ms</span>
+              </span>
+              <span class="flex items-center gap-1.5 text-sky-400">
+                <span class="w-3 h-0.5 bg-sky-400 inline-block"></span>
+                <span>解码 {{ primaryMetrics.stage_latency.decode_ms.toFixed(1) }} ms</span>
+              </span>
+              <span class="flex items-center gap-1.5 text-teal-400">
+                <span class="w-3 h-0.5 bg-teal-400 inline-block"></span>
+                <span>跟踪 {{ primaryMetrics.stage_latency.track_ms.toFixed(1) }} ms</span>
+              </span>
+              <span class="flex items-center gap-1.5 text-emerald-400">
+                <span class="w-3 h-0.5 bg-emerald-400 inline-block"></span>
+                <span>规则 {{ primaryMetrics.stage_latency.rules_ms.toFixed(1) }} ms</span>
               </span>
             </div>
           </div>
 
-          <!-- MJPEG Underlay + Transparent Vector Canvas Overlay -->
-          <div class="relative w-full aspect-video bg-slate-950 overflow-hidden flex items-center justify-center">
-            <template v-if="paneTaskId">
-              <!-- Real MJPEG Underlay -->
-              <img
-                v-if="shouldShowVideoFeed(paneTaskId)"
-                :src="videoFeedUrl(paneTaskId, paneIdx)"
-                class="w-full h-full object-contain block select-none"
-                alt="Live MJPEG Stream"
-                @load="onImgLoad(paneTaskId)"
-                @error="onImgError(paneTaskId)"
-              />
-
-              <!-- Standby / Waiting Overlay -->
-              <div
-                v-if="!shouldShowVideoFeed(paneTaskId) || mjpegErrored[paneTaskId]"
-                class="absolute inset-0 flex flex-col items-center justify-center text-slate-400 text-xs gap-2 pointer-events-none bg-slate-950/85"
-              >
-                <span class="text-2xl">{{ getTaskStatus(paneTaskId) === 'error' ? '\u274C' : '\u{1F4F7}' }}</span>
-                <span v-if="getTaskStatus(paneTaskId) === 'idle' || getTaskStatus(paneTaskId) === 'stopped'">
-                  演示任务当前已关闭 — 请点击上方「Demo 任务启停控制」中的【开启】按钮启动推流
-                </span>
-                <span v-else-if="getTaskStatus(paneTaskId) === 'error'">任务运行异常，请检查本地视频源或权重路径</span>
-                <span v-else>正在等待 MJPEG 视频帧与 WebSocket 跟踪流...</span>
-              </div>
-
-              <!-- Transparent Vector Canvas Overlay -->
-              <canvas
-                :ref="(el) => setCanvasRef(paneIdx, el)"
-                :width="getFrameWidth(paneTaskId)"
-                :height="getFrameHeight(paneTaskId)"
-                class="absolute inset-0 w-full h-full object-contain pointer-events-none block"
-              ></canvas>
-
-              <!-- Active Violation Alert Toast on Primary / Single View -->
-              <transition-group
-                v-if="paneIdx === 0"
-                name="fade"
-                tag="div"
-                class="absolute top-3 right-3 flex flex-col gap-2 max-w-sm pointer-events-none"
-              >
-                <div
-                  v-for="v in getPaneViolations(paneTaskId)"
-                  :key="`${v.track_id}-${v.frame_id}-${v.violation_type}`"
-                  class="bg-rose-950/90 border border-rose-500 text-rose-200 text-xs px-3 py-2 rounded-lg shadow-lg backdrop-blur alert-pulse pointer-events-auto flex items-start gap-2"
-                >
-                  <span class="text-base">&#x1F6A8;</span>
-                  <div class="flex-1">
-                    <div class="font-bold flex items-center justify-between gap-2">
-                      <span>{{ formatViolationTitle(v.violation_type) }}</span>
-                      <span class="text-[10px] text-rose-400">Track #{{ v.track_id }}</span>
-                    </div>
-                    <p class="text-[11px] text-rose-300/90 mt-0.5">
-                      {{ v.details?.note || '检测到异常轨迹行为' }}
-                    </p>
-                  </div>
-                </div>
-              </transition-group>
-
-              <!-- Compact Violation Pill on Secondary Multi-View Panes -->
-              <div
-                v-else-if="getPaneViolations(paneTaskId).length > 0"
-                class="absolute top-2 right-2 bg-rose-950/90 border border-rose-500 text-rose-200 text-[10px] px-2 py-1 rounded shadow pointer-events-none"
-              >
-                <span>&#x1F6A8; 违章报警 &times;{{ getPaneViolations(paneTaskId).length }}</span>
-              </div>
-            </template>
-
-            <div v-else class="text-slate-500 text-xs">
-              <span>请在上方选择此分屏窗口的监控任务</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Bottom Stream Actions & Resolution / Pipeline Metadata -->
-      <div class="flex flex-wrap items-center justify-between gap-2 pt-1 px-1 text-xs">
-        <div class="flex flex-wrap items-center gap-4 text-slate-400">
-          <span>分辨率: {{ primaryFrameWidth }} &times; {{ primaryFrameHeight }}</span>
-          <span>
-            检测后端:
-            <strong class="text-slate-200 uppercase">
-              {{ store.activeTask?.config?.detector_type || 'mock' }}
-              <template v-if="store.activeTask?.config?.detector_type !== 'mock'">
-                ({{ store.activeTask?.config?.device || 'cuda:0' }}{{ store.activeTask?.config?.half_precision !== false ? ' FP16' : ' FP32' }})
-              </template>
-            </strong>
-          </span>
-          <span>
-            播放策略:
-            <strong class="text-emerald-300">
-              {{
-                (store.activeTask?.config?.playback_mode || 'native') === 'native'
-                  ? '固定原速 (按源帧率)'
-                  : (store.activeTask?.config?.fps ?? 0) <= 0
-                    ? '全速不限速 (300+ FPS)'
-                    : `全速限速 ${store.activeTask?.config?.fps} FPS`
-              }}
-            </strong>
-          </span>
-          <span>
-            自适应跳帧:
-            <strong class="text-cyan-300">
-              {{
-                store.activeTask?.config?.adaptive_skip
-                  ? `开启 (步长 <= ${store.activeTask?.config?.max_skip_stride || 2})`
-                  : '关闭 (逐帧检测)'
-              }}
-            </strong>
-          </span>
-          <span>跟踪特性: {{ activeFeatureSummary }}</span>
-        </div>
-
-        <div class="flex items-center gap-2">
-          <button
-            v-if="store.activeTask?.status !== 'running'"
-            @click="handleStart"
-            :disabled="!store.activeTaskId"
-            class="btn btn-primary text-xs py-1.5 px-3"
-          >
-            <span>&#x25B6; 启动推流</span>
-          </button>
-          <button
-            v-else
-            @click="handleStop"
-            class="btn btn-danger text-xs py-1.5 px-3"
-          >
-            <span>&#x23F9; 停止推流</span>
-          </button>
-          <button
-            @click="handleReconnect"
-            :disabled="!store.activeTaskId || store.activeTask?.status !== 'running'"
-            class="btn btn-secondary text-xs py-1.5 px-3 disabled:opacity-50"
-          >
-            <span>&#x1F504; 重新连接</span>
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Real-Time End-to-End Pipeline Latency Breakdown Line Chart -->
-    <div class="card p-4 bg-slate-900/90 border border-slate-800 space-y-3">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="flex items-center gap-2">
-          <h3 class="text-sm font-semibold text-slate-100">&#x1F4C8; 实时流水线端到端耗时分解折线图 (ms)</h3>
-          <span class="text-[11px] text-slate-400">（最近 {{ latencyHistory.length }} 帧滚动窗口）</span>
-        </div>
-
-        <div class="flex flex-wrap items-center gap-3 text-xs font-mono">
-          <span class="flex items-center gap-1.5 text-slate-200">
-            <span class="w-3 h-0.5 bg-slate-100 inline-block"></span>
-            <span>Total {{ primaryMetrics.stage_latency.total_ms.toFixed(1) }} ms</span>
-          </span>
-          <span class="flex items-center gap-1.5 text-rose-400">
-            <span class="w-3 h-0.5 border-t border-dashed border-rose-400 inline-block"></span>
-            <span>P95 {{ primaryMetrics.p95_latency_ms.toFixed(1) }} ms</span>
-          </span>
-          <span class="flex items-center gap-1.5 text-amber-400">
-            <span class="w-3 h-0.5 bg-amber-400 inline-block"></span>
-            <span>Detect {{ primaryMetrics.stage_latency.detect_ms.toFixed(1) }} ms</span>
-          </span>
-          <span class="flex items-center gap-1.5 text-sky-400">
-            <span class="w-3 h-0.5 bg-sky-400 inline-block"></span>
-            <span>Decode {{ primaryMetrics.stage_latency.decode_ms.toFixed(1) }} ms</span>
-          </span>
-          <span class="flex items-center gap-1.5 text-teal-400">
-            <span class="w-3 h-0.5 bg-teal-400 inline-block"></span>
-            <span>Track {{ primaryMetrics.stage_latency.track_ms.toFixed(1) }} ms</span>
-          </span>
-          <span class="flex items-center gap-1.5 text-emerald-400">
-            <span class="w-3 h-0.5 bg-emerald-400 inline-block"></span>
-            <span>Rules {{ primaryMetrics.stage_latency.rules_ms.toFixed(1) }} ms</span>
-          </span>
-        </div>
-      </div>
-
-      <div class="relative w-full h-44 bg-slate-950/90 rounded-lg border border-slate-800/80 overflow-hidden">
-        <svg
-          v-if="latencyHistory.length >= 2"
-          viewBox="0 0 800 180"
-          preserveAspectRatio="none"
-          class="w-full h-full block"
-        >
-          <!-- Horizontal gridlines & ms labels -->
-          <g v-for="(tick, idx) in latencyGridTicks" :key="`grid-${idx}`">
-            <line
-              x1="44"
-              :y1="tick.y"
-              x2="788"
-              :y2="tick.y"
-              stroke="rgba(51, 65, 85, 0.55)"
-              stroke-dasharray="3 3"
-              stroke-width="1"
-            />
-            <text
-              x="38"
-              :y="tick.y + 3"
-              text-anchor="end"
-              fill="#64748b"
-              font-size="10"
-              font-family="monospace"
+          <div class="relative w-full h-44 bg-slate-950/90 rounded-lg border border-slate-800/80 overflow-hidden">
+            <svg
+              v-if="activeFrame && latencyHistory.length >= 2"
+              viewBox="0 0 800 180"
+              preserveAspectRatio="none"
+              class="w-full h-full block"
             >
-              {{ tick.label }}
-            </text>
-          </g>
+              <!-- Horizontal gridlines & ms labels -->
+              <g v-for="(tick, idx) in latencyGridTicks" :key="`grid-${idx}`">
+                <line
+                  x1="44"
+                  :y1="tick.y"
+                  x2="788"
+                  :y2="tick.y"
+                  stroke="rgba(51, 65, 85, 0.55)"
+                  stroke-dasharray="3 3"
+                  stroke-width="1"
+                />
+                <text
+                  x="38"
+                  :y="tick.y + 3"
+                  text-anchor="end"
+                  fill="#64748b"
+                  font-size="10"
+                  font-family="monospace"
+                >
+                  {{ tick.label }}
+                </text>
+              </g>
 
-          <!-- P95 reference curve -->
-          <polyline
-            fill="none"
-            stroke="#fb7185"
-            stroke-width="1.6"
-            stroke-dasharray="5 4"
-            :points="latencyPolylines.p95"
-          />
-          <!-- Stage series -->
-          <polyline
-            fill="none"
-            stroke="#34d399"
-            stroke-width="1.6"
-            :points="latencyPolylines.rules"
-          />
-          <polyline
-            fill="none"
-            stroke="#2dd4bf"
-            stroke-width="1.8"
-            :points="latencyPolylines.track"
-          />
-          <polyline
-            fill="none"
-            stroke="#38bdf8"
-            stroke-width="1.8"
-            :points="latencyPolylines.decode"
-          />
-          <polyline
-            fill="none"
-            stroke="#fbbf24"
-            stroke-width="2"
-            :points="latencyPolylines.detect"
-          />
-          <polyline
-            fill="none"
-            stroke="#f1f5f9"
-            stroke-width="2.2"
-            :points="latencyPolylines.total"
-          />
-        </svg>
-        <div
-          v-else
-          class="w-full h-full flex items-center justify-center text-xs text-slate-500"
-        >
-          <span>开启 Demo 任务推流后将实时绘制各流水线阶段端到端耗时曲线...</span>
+              <!-- P95 reference curve -->
+              <polyline
+                fill="none"
+                stroke="#fb7185"
+                stroke-width="1.6"
+                stroke-dasharray="5 4"
+                :points="latencyPolylines.p95"
+              />
+              <!-- Stage series -->
+              <polyline
+                fill="none"
+                stroke="#34d399"
+                stroke-width="1.6"
+                :points="latencyPolylines.rules"
+              />
+              <polyline
+                fill="none"
+                stroke="#2dd4bf"
+                stroke-width="1.8"
+                :points="latencyPolylines.track"
+              />
+              <polyline
+                fill="none"
+                stroke="#38bdf8"
+                stroke-width="1.8"
+                :points="latencyPolylines.decode"
+              />
+              <polyline
+                fill="none"
+                stroke="#fbbf24"
+                stroke-width="2"
+                :points="latencyPolylines.detect"
+              />
+              <polyline
+                fill="none"
+                stroke="#f1f5f9"
+                stroke-width="2.2"
+                :points="latencyPolylines.total"
+              />
+            </svg>
+            <div
+              v-else
+              class="w-full h-full flex items-center justify-center text-xs text-slate-500"
+            >
+              <span>任务运行后显示处理耗时</span>
+            </div>
+          </div>
         </div>
       </div>
-    </div>
+    </details>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch, type ComponentPublicInstance } from 'vue';
+import VideoSourceDialog from './VideoSourceDialog.vue';
 import { useMotStore } from '../stores/motStore';
 import type {
   DetectorType,
   StreamConfig,
-  SystemMetrics,
   TrackFrame,
   TrackItem,
   ViolationEvent,
@@ -769,12 +569,15 @@ const MAX_LATENCY_POINTS = 60;
 
 const store = useMotStore();
 const layoutMode = ref<LayoutMode>('1x1');
-const showSettingsPanel = ref(false);
+const sourceDialog = ref<InstanceType<typeof VideoSourceDialog> | null>(null);
+const taskActionBusy = ref(false);
+const isRunning = computed(() => store.activeTask?.status === 'running');
 const savingConfig = ref(false);
 const paneSelections = ref<(number | null)[]>([null, null, null, null]);
 const canvasRefs = ref<Record<number, HTMLCanvasElement>>({});
 const mjpegEpochs = ref<Record<number, number>>({});
 const mjpegErrored = ref<Record<number, boolean>>({});
+const mjpegReady = ref<Record<number, boolean>>({});
 const latencyHistory = ref<LatencySample[]>([]);
 let animationId = 0;
 
@@ -788,7 +591,7 @@ watch(
 watch(
   () => store.currentFrame,
   (frame) => {
-    if (!frame || store.activeTask?.status !== 'running' || !frame.metrics?.stage_latency) {
+    if (!frame || frame.task_id !== store.activeTaskId || !isRunning.value || !frame.metrics?.stage_latency) {
       return;
     }
     const st = frame.metrics.stage_latency;
@@ -931,11 +734,9 @@ function handlePaneTaskChange(paneIdx: number, e: Event) {
 }
 
 function getPaneFrame(taskId: number | null): TrackFrame | null {
-  if (!taskId) return null;
-  if (layoutMode.value === '1x1' && taskId === store.activeTaskId) {
-    return store.currentFrame || store.multiFrames[taskId] || null;
-  }
-  return store.multiFrames[taskId] || (taskId === store.activeTaskId ? store.currentFrame : null);
+  if (!taskId || !shouldShowVideoFeed(taskId)) return null;
+  if (taskId === store.activeTaskId) return activeFrame.value;
+  return store.multiWsStatus[taskId] ? store.multiFrames[taskId] ?? null : null;
 }
 
 function getPaneZones(taskId: number | null): Zone[] {
@@ -946,7 +747,7 @@ function getPaneZones(taskId: number | null): Zone[] {
 }
 
 function getPaneViolations(taskId: number | null): ViolationEvent[] {
-  return getPaneFrame(taskId)?.active_violations || [];
+  return taskId && getPaneFrame(taskId) ? store.recentViolationsByTask[taskId] ?? [] : [];
 }
 
 function getTaskStatus(taskId: number): string {
@@ -963,6 +764,7 @@ function videoFeedUrl(taskId: number, paneIdx = 0): string {
 }
 
 function onImgLoad(taskId: number) {
+  if (!mjpegReady.value[taskId]) mjpegReady.value = { ...mjpegReady.value, [taskId]: true };
   if (mjpegErrored.value[taskId]) {
     mjpegErrored.value = { ...mjpegErrored.value, [taskId]: false };
   }
@@ -990,80 +792,72 @@ function isPaneDemo(taskId: number | null): boolean {
   return task.video_source === 'demo' || task.config?.detector_type === 'mock';
 }
 
-const primaryMetrics = computed<SystemMetrics>(() => {
-  return store.currentFrame?.metrics || store.systemMetrics;
+const activeFrame = computed(() => {
+  const frame = store.currentFrame;
+  return isRunning.value && store.wsConnected && frame?.task_id === store.activeTaskId ? frame : null;
+});
+const primaryMetrics = computed(() => activeFrame.value?.metrics ?? store.systemMetrics);
+const pendingViolations = computed(() =>
+  store.unacknowledgedViolations.filter((event) => event.task_id === store.activeTaskId).length,
+);
+const detectorLabel = computed(() => {
+  const detector = store.activeTask?.config.detector_type;
+  if (detector === 'tensorrt') return 'TensorRT';
+  if (detector === 'onnx') return 'ONNX';
+  return 'YOLO';
+});
+const isPrimarySimulation = computed(() => store.activeTask?.video_source === 'demo' || store.activeTask?.config.detector_type === 'mock');
+const sourceLabel = computed(() => {
+  const source = store.activeTask?.video_source;
+  if (source === 'demo:violations') return '内置模拟视频 · 逆行、越界和滞留';
+  if (source === 'demo') return '内置模拟视频';
+  return source || '尚未选择视频源';
+});
+const statusLabel = computed(() => formatTaskStatus(store.activeTask?.status));
+const connectionLabel = computed(() => {
+  if (!isRunning.value) return '跟踪未启动';
+  if (store.wsConnected) return '跟踪数据已连接';
+  if (store.wsError) return '跟踪数据连接异常';
+  return '等待跟踪数据';
 });
 
-const primaryTracksCount = computed(() => {
-  return store.currentFrame?.tracks?.length ?? store.activeTracksCount;
-});
-
-const activeStreamsFallback = computed(() => {
-  return store.tasks.filter((t) => t.status === 'running').length;
-});
-
-const activeViolationsCount = computed(() => {
-  return store.currentFrame?.active_violations?.length || 0;
-});
-
-const isPrimaryDemoSimulation = computed(() => {
-  if (store.currentFrame?.is_demo_simulation !== undefined) {
-    return store.currentFrame.is_demo_simulation;
+function formatTaskStatus(status?: string) {
+  switch (status) {
+    case 'running': return '运行中';
+    case 'paused': return '已暂停';
+    case 'stopped': return '已停止';
+    case 'error': return '任务异常';
+    case 'idle': return '待启动';
+    default: return '未选择';
   }
-  if (store.systemMetrics.is_demo_simulation !== undefined) {
-    return store.systemMetrics.is_demo_simulation;
-  }
-  const t = store.activeTask;
-  return !t || t.video_source === 'demo' || t.config?.detector_type === 'mock';
-});
+}
 
-const primaryIsKeyframe = computed(() => {
-  return store.currentFrame?.is_keyframe !== false;
-});
+function previewTitle(taskId: number) {
+  if (mjpegErrored.value[taskId]) return '视频预览连接异常';
+  if (getTaskStatus(taskId) === 'error') return '任务运行异常';
+  return shouldShowVideoFeed(taskId) ? '正在等待视频画面' : '视频尚未开始';
+}
 
-const primarySkipRatioPct = computed(() => {
-  const ratio =
-    store.currentFrame?.metrics?.detect_skip_ratio ?? store.systemMetrics.detect_skip_ratio ?? 0;
-  return (ratio * 100).toFixed(1);
-});
-
-const primaryFrameWidth = computed(() => getFrameWidth(store.activeTaskId));
-const primaryFrameHeight = computed(() => getFrameHeight(store.activeTaskId));
-
-const activeFeatureSummary = computed(() => {
-  const cfg = store.activeTask?.config;
-  if (!cfg) return 'Class-Aware + NSA + DIoU + VDC + ORU + LazyHSV';
-  const parts: string[] = [];
-  if (cfg.use_class_aware !== false) parts.push('ClassAware');
-  if (cfg.use_nsa) parts.push('NSA');
-  if (cfg.use_diou) parts.push('DIoU');
-  if (cfg.use_vdc !== false) parts.push('VDC');
-  if (cfg.use_oru !== false) parts.push('ORU');
-  if (cfg.use_lazy_appearance !== false) parts.push('LazyHSV');
-  if (cfg.use_recovery_pool) parts.push('Pool');
-  return parts.length > 0 ? parts.join(' / ') : 'Baseline ByteTrack';
-});
-
-const isCudaActive = computed(() => {
-  const cfg = store.activeTask?.config;
-  if (!cfg || cfg.detector_type === 'mock') return false;
-  const dev = (cfg.device || 'cuda:0').toLowerCase();
-  return dev.startsWith('cuda') || dev === 'auto';
-});
+function previewHint(taskId: number) {
+  if (mjpegErrored.value[taskId]) return '可重新连接视频预览。';
+  if (getTaskStatus(taskId) === 'error') return '请检查视频来源和检测模型。';
+  if (shouldShowVideoFeed(taskId)) return '首帧到达后将在此显示。';
+  return taskId === store.activeTaskId ? '选择上方的「开始跟踪」启动任务。' : '可在任务管理中启动此任务。';
+}
 
 const isRoiRulesEnabled = computed(() => {
   return Boolean(store.activeTask?.config?.enable_roi_rules);
 });
 
 async function applyActiveConfig(patch: Partial<StreamConfig>) {
-  if (!store.activeTaskId || savingConfig.value) return;
+  if (!store.activeTaskId || savingConfig.value || taskActionBusy.value) return;
   savingConfig.value = true;
   try {
     const tid = store.activeTaskId;
     const updated = await store.updateTaskConfig(tid, patch);
     if (updated) {
-      mjpegErrored.value = { ...mjpegErrored.value, [tid]: false };
-      mjpegEpochs.value = { ...mjpegEpochs.value, [tid]: Date.now() };
+      latencyHistory.value = [];
+      resetPreview(tid);
     }
   } finally {
     savingConfig.value = false;
@@ -1090,24 +884,64 @@ function formatViolationTitle(type: string): string {
   }
 }
 
-function handleSelectDemoTask(id: number) {
+function resetPreview(taskId: number) {
+  mjpegErrored.value = { ...mjpegErrored.value, [taskId]: false };
+  mjpegReady.value = { ...mjpegReady.value, [taskId]: false };
+  mjpegEpochs.value = { ...mjpegEpochs.value, [taskId]: (mjpegEpochs.value[taskId] ?? 0) + 1 };
+}
+
+function focusTask(id: number) {
+  layoutMode.value = '1x1';
   store.setActiveTask(id);
-  store.fetchViolations();
+  latencyHistory.value = [];
+  resetPreview(id);
+  void store.fetchViolations();
 }
 
-async function handleStartTaskById(id: number) {
-  mjpegErrored.value = { ...mjpegErrored.value, [id]: false };
-  mjpegEpochs.value = { ...mjpegEpochs.value, [id]: Date.now() };
-  if (id === store.activeTaskId || store.singleStreamExclusive) {
-    latencyHistory.value = [];
+function handleTaskChange(event: Event) {
+  const id = Number((event.target as HTMLSelectElement).value);
+  if (!id) return;
+  store.taskError = null;
+  focusTask(id);
+}
+
+async function toggleTracking() {
+  const id = store.activeTaskId;
+  if (!id || taskActionBusy.value) return;
+  taskActionBusy.value = true;
+  try {
+    if (isRunning.value) {
+      if (await store.stopTask(id)) {
+        latencyHistory.value = [];
+        resetPreview(id);
+      }
+    } else {
+      latencyHistory.value = [];
+      resetPreview(id);
+      if (await store.startTask(id)) void store.fetchViolations();
+    }
+  } finally {
+    taskActionBusy.value = false;
   }
-  await store.startTask(id);
 }
 
-async function handleStopTaskById(id: number) {
-  await store.stopTask(id);
-  if (id === store.activeTaskId) {
-    latencyHistory.value = [];
+async function startDemo() {
+  if (taskActionBusy.value || savingConfig.value) return;
+  taskActionBusy.value = true;
+  store.taskError = null;
+  try {
+    const task = await store.prepareViolationDemo();
+    if (task) {
+      focusTask(task.id);
+      if (!task.config.enable_roi_rules) {
+        const updated = await store.updateTaskConfig(task.id, { enable_roi_rules: true });
+        if (!updated) return;
+      }
+      store.displaySettings.showZones = true;
+      if (task.status !== 'running' && await store.startTask(task.id)) void store.fetchViolations();
+    }
+  } finally {
+    taskActionBusy.value = false;
   }
 }
 
@@ -1142,27 +976,15 @@ async function handleDetectorTypeChange(e: Event) {
   });
 }
 
-async function handleStart() {
-  if (!store.activeTaskId) return;
-  await handleStartTaskById(store.activeTaskId);
-}
-
-async function handleStop() {
-  if (store.activeTaskId) {
-    await handleStopTaskById(store.activeTaskId);
-  }
-}
-
 function handleReconnect() {
   if (!store.activeTaskId) return;
   const tid = store.activeTaskId;
-  mjpegErrored.value = { ...mjpegErrored.value, [tid]: false };
-  mjpegEpochs.value = { ...mjpegEpochs.value, [tid]: Date.now() };
+  resetPreview(tid);
   store.connectWebSocket(tid);
   if (layoutMode.value !== '1x1') {
     for (const id of visiblePaneTaskIds.value) {
       if (id) {
-        mjpegEpochs.value = { ...mjpegEpochs.value, [id]: Date.now() };
+        if (id !== tid) resetPreview(id);
         store.connectTaskWs(id);
       }
     }
@@ -1209,7 +1031,7 @@ function drawPaneOverlay(paneIdx: number, taskId: number | null) {
   }
 
   const tracks = frame?.tracks || [];
-  const activeViolations = frame?.active_violations || [];
+  const activeViolations = getPaneViolations(taskId);
   const activeViolatorIds = new Set(activeViolations.map((v) => v.track_id));
 
   for (const t of tracks) {

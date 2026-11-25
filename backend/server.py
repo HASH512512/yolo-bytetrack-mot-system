@@ -31,7 +31,13 @@ from backend.schemas import (
     ZoneRead,
     ZoneType,
 )
-from backend.stream_engine import PROJECT_ROOT, _get_demo_scenario_assets, _resolve_local_path, stream_manager
+from backend.stream_engine import (
+    PROJECT_ROOT,
+    VIOLATION_DEMO_SOURCE,
+    _get_demo_scenario_assets,
+    _resolve_local_path,
+    stream_manager,
+)
 from pipeline.video_stream import _IMAGE_EXTENSIONS, _natural_sort_key
 
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".flv", ".ts", ".webm"}
@@ -219,54 +225,51 @@ def _seed_initial_data() -> None:
                 ),
             )
         )
-        task_id = demo_task.id
+        for zone in _campus_demo_zones(demo_task.id):
+            db.create_zone(zone)
 
+
+def _campus_demo_zones(task_id: int) -> List[ZoneCreate]:
+    return [
         # Eastbound lane (vehicles move left -> right)
-        db.create_zone(
-            ZoneCreate(
-                task_id=task_id,
-                name="Eastbound Lane (东向主干道)",
-                zone_type=ZoneType.LANE,
-                polygon=[[0, 260], [1280, 260], [1280, 360], [0, 360]],
-                direction_vector=[1.0, 0.0],
-                speed_limit=15.0,
-            )
-        )
+        ZoneCreate(
+            task_id=task_id,
+            name="Eastbound Lane (东向主干道)",
+            zone_type=ZoneType.LANE,
+            polygon=[[0, 260], [1280, 260], [1280, 360], [0, 360]],
+            direction_vector=[1.0, 0.0],
+            speed_limit=15.0,
+        ),
 
         # Westbound lane (vehicles move right -> left)
-        db.create_zone(
-            ZoneCreate(
-                task_id=task_id,
-                name="Westbound Lane (西向主干道)",
-                zone_type=ZoneType.LANE,
-                polygon=[[0, 360], [1280, 360], [1280, 460], [0, 460]],
-                direction_vector=[-1.0, 0.0],
-                speed_limit=15.0,
-            )
-        )
+        ZoneCreate(
+            task_id=task_id,
+            name="Westbound Lane (西向主干道)",
+            zone_type=ZoneType.LANE,
+            polygon=[[0, 360], [1280, 360], [1280, 460], [0, 460]],
+            direction_vector=[-1.0, 0.0],
+            speed_limit=15.0,
+        ),
 
         # Restricted pedestrian courtyard / lawn
-        db.create_zone(
-            ZoneCreate(
-                task_id=task_id,
-                name="Restricted Courtyard (中心草坪禁行区)",
-                zone_type=ZoneType.INTRUSION,
-                polygon=[[480, 60], [820, 60], [820, 210], [480, 210]],
-                dwell_limit_sec=0.0,
-            )
-        )
+        ZoneCreate(
+            task_id=task_id,
+            name="Restricted Courtyard (中心草坪禁行区)",
+            zone_type=ZoneType.INTRUSION,
+            polygon=[[480, 60], [820, 60], [820, 210], [480, 210]],
+            dwell_limit_sec=0.0,
+        ),
 
         # Pedestrian plaza loitering zone
-        db.create_zone(
-            ZoneCreate(
-                task_id=task_id,
-                name="South Plaza Loitering Zone (南广场滞留监测区)",
-                zone_type=ZoneType.LOITERING,
-                polygon=[[480, 470], [740, 470], [740, 620], [480, 620]],
-                speed_limit=1.0,
-                dwell_limit_sec=3.0,
-            )
-        )
+        ZoneCreate(
+            task_id=task_id,
+            name="South Plaza Loitering Zone (南广场滞留监测区)",
+            zone_type=ZoneType.LOITERING,
+            polygon=[[480, 470], [740, 470], [740, 620], [480, 620]],
+            speed_limit=1.0,
+            dwell_limit_sec=3.0,
+        ),
+    ]
 
 
 @asynccontextmanager
@@ -315,6 +318,24 @@ def get_tasks() -> List[TaskRead]:
 @app.post("/api/tasks", response_model=TaskRead, status_code=status.HTTP_201_CREATED)
 def create_task(task: TaskCreate) -> TaskRead:
     return db.create_task(task)
+
+
+@app.post("/api/tasks/violation-demo", response_model=TaskRead)
+def prepare_violation_demo() -> TaskRead:
+    return db.get_or_create_task_for_source(
+        TaskCreate(
+            name="校园道路违章演示（模拟）",
+            video_source=VIOLATION_DEMO_SOURCE,
+            config=StreamConfig(
+                video_source=VIOLATION_DEMO_SOURCE,
+                detector_type=DetectorType.MOCK,
+                fps=25,
+                batch_size=1,
+                enable_roi_rules=True,
+            ),
+        ),
+        _campus_demo_zones,
+    )
 
 
 @app.get("/api/tasks/{task_id}", response_model=TaskRead)
@@ -439,11 +460,14 @@ def get_task_frame_image(task_id: int, frame_id: int) -> Response:
 
     raw_source = (task.video_source or task.config.video_source or "").strip()
     is_demo = (
-        raw_source.lower() == "demo" or task.config.detector_type == DetectorType.MOCK
+        raw_source.lower() in ("demo", VIOLATION_DEMO_SOURCE)
+        or task.config.detector_type == DetectorType.MOCK
     )
     frame = None
     if is_demo:
-        frames, _ = _get_demo_scenario_assets(num_frames=180)
+        frames, _ = _get_demo_scenario_assets(
+            num_frames=180, violation_demo=raw_source.lower() == VIOLATION_DEMO_SOURCE
+        )
         if frames:
             idx = (max(1, int(frame_id)) - 1) % len(frames)
             frame = frames[idx]

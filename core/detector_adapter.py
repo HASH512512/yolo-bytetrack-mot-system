@@ -767,8 +767,9 @@ class MockDetectorAdapter(DetectorAdapter):
         cls,
         num_frames: int = 120,
         frame_size: Tuple[int, int] = (1280, 720),
+        violation_demo: bool = False,
     ) -> "MockDetectorAdapter":
-        """Build a deterministic campus road scenario with normal, wrong-way, intrusion, and loitering targets."""
+        """Build the campus road scenario for tracking or a timed traffic-rule demo."""
         scripted: Dict[int, List[Detection]] = {}
         for f in range(num_frames):
             dets: List[Detection] = []
@@ -778,11 +779,17 @@ class MockDetectorAdapter(DetectorAdapter):
 
             # Target B: wrong-way e-bike/motorcycle moving right -> left (y ~ 310)
             cx_b = 1000.0 - f * 5.0
-            dets.append(Detection([cx_b - 20, 290, cx_b + 20, 340], 0.85, 3, "motorcycle"))
+            if not violation_demo or f >= 12:
+                dets.append(Detection([cx_b - 20, 290, cx_b + 20, 340], 0.85, 3, "motorcycle"))
 
             # Target C: loitering pedestrian near (600, 500)
             jx = 1.5 * np.sin(f * 0.2)
             dets.append(Detection([585 + jx, 460, 615 + jx, 540], 0.88, 0, "person"))
+
+            if violation_demo:
+                # This pedestrian starts west of the courtyard and walks through it.
+                cx_d = 370.0 + f * 4.0
+                dets.append(Detection([cx_d - 15, 110, cx_d + 15, 173], 0.90, 0, "person"))
 
             scripted[f] = dets
         return cls(scripted_detections=scripted)

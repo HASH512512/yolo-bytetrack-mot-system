@@ -1,13 +1,12 @@
 <template>
   <div class="space-y-4">
     <!-- Top Summary Banner -->
-    <div class="card bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border-indigo-900/40">
+    <div class="card">
       <div class="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div class="space-y-1.5">
           <div class="flex flex-wrap items-center gap-2">
             <h2 class="text-lg font-bold text-slate-100 flex items-center gap-2">
-              <span>&#x1F3AF;</span>
-              <span>ByteTrack 算法消融实验与流水线性能评测</span>
+              ByteTrack 消融实验
             </h2>
 
             <!-- Prominent data_kind Isolation Badge -->
@@ -15,7 +14,6 @@
               v-if="isRealBenchmarkData"
               class="badge badge-green text-xs gap-1"
             >
-              <span>&#x2705;</span>
               <span>
                 真实实测数据 ({{ primaryDataKind === 'public_benchmark' ? '公开数据集实测' : '自采真实视频实测' }})
               </span>
@@ -24,8 +22,7 @@
               v-else
               class="badge badge-amber text-xs gap-1"
             >
-              <span>&#x26A0;&#xFE0F;</span>
-              <span>合成基准数据 (synthetic) — 用于算法模块功能验证</span>
+              <span>合成基准数据，用于算法功能验证</span>
             </span>
           </div>
 

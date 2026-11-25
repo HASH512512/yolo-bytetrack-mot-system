@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from time import monotonic, sleep
 import pytest
 from fastapi.testclient import TestClient
 
@@ -241,6 +242,49 @@ def test_health_check(client):
     res = client.get("/api/health")
     assert res.status_code == 200
     assert res.json()["status"] == "ok"
+
+
+def test_violation_demo_reuses_task_and_detects_three_rules(tmp_path, monkeypatch):
+    db = Database(tmp_path / "violation_demo.db")
+    monkeypatch.setattr("backend.server.db", db)
+    monkeypatch.setattr("backend.stream_engine.db", db)
+    # Simulate a database from before the dedicated demo existed.
+    legacy = db.create_task(TaskCreate(name="Existing demo", video_source="demo"))
+    expected_types = {"wrong_way", "intrusion", "loitering"}
+
+    with TestClient(app) as client:
+        prepared = client.post("/api/tasks/violation-demo")
+        assert prepared.status_code == 200
+        demo = prepared.json()
+        task_id = demo["id"]
+        assert task_id != legacy.id
+        assert demo["config"]["enable_roi_rules"]
+        zones = client.get(f"/api/zones?task_id={task_id}").json()
+        assert len(zones) == 4
+        assert client.post("/api/tasks/violation-demo").json()["id"] == task_id
+        assert client.get(f"/api/zones?task_id={task_id}").json() == zones
+        assert db.get_task(legacy.id) == legacy
+        assert db.list_zones(legacy.id) == []
+
+        endpoint = f"/api/violations?task_id={task_id}"
+        assert client.get(endpoint).json() == []
+        assert client.post(f"/api/tasks/{task_id}/start").status_code == 200
+        deadline = monotonic() + 10
+        while monotonic() < deadline:
+            alerts = client.get(endpoint).json()
+            if {event["violation_type"] for event in alerts} == expected_types:
+                break
+            sleep(0.05)
+        assert {event["violation_type"] for event in alerts} == expected_types
+        assert all(event["frame_id"] <= 180 for event in alerts)
+        assert all(event["zone_id"] in {zone["id"] for zone in zones} for event in alerts)
+        assert {
+            (event["violation_type"], event["details"]["cls_name"]) for event in alerts
+        } == {("wrong_way", "motorcycle"), ("intrusion", "person"), ("loitering", "person")}
+
+        cars = client.get(f"/api/tracks?task_id={task_id}&class_name=car").json()["summaries"]
+        assert cars
+        assert all(car["violation_count"] == 0 for car in cars)
 
 
 def test_task_endpoints(client):

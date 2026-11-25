@@ -45,9 +45,10 @@ from pipeline.rules_engine import CampusRoadRulesEngine
 from pipeline.video_stream import VideoStreamReader, detect_source_native_fps
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+VIOLATION_DEMO_SOURCE = "demo:violations"
 
 _DEMO_CACHE_LOCK = threading.Lock()
-_DEMO_FRAMES_CACHE: Optional[Tuple[List[np.ndarray], Dict[int, List[Detection]]]] = None
+_DEMO_FRAMES_CACHE: Dict[Tuple[int, bool], Tuple[List[np.ndarray], Dict[int, List[Detection]]]] = {}
 
 
 def _build_demo_campus_background(width: int = 1280, height: int = 720) -> np.ndarray:
@@ -103,16 +104,20 @@ def _build_demo_campus_background(width: int = 1280, height: int = 720) -> np.nd
 
 def _get_demo_scenario_assets(
     num_frames: int = 180,
+    violation_demo: bool = False,
 ) -> Tuple[List[np.ndarray], Dict[int, List[Detection]]]:
     """Build or return cached 1280x720 looping demo frames and matching detections."""
-    global _DEMO_FRAMES_CACHE
+    cache_key = (num_frames, violation_demo)
     with _DEMO_CACHE_LOCK:
-        if _DEMO_FRAMES_CACHE is not None and len(_DEMO_FRAMES_CACHE[0]) == num_frames:
-            return _DEMO_FRAMES_CACHE
+        if cache_key in _DEMO_FRAMES_CACHE:
+            return _DEMO_FRAMES_CACHE[cache_key]
 
+        # Keep only one rendered scene cached. Active runners hold their own frames.
+        _DEMO_FRAMES_CACHE.clear()
         mock_scenario = MockDetectorAdapter.create_synthetic_campus_scenario(
             num_frames=num_frames,
             frame_size=(1280, 720),
+            violation_demo=violation_demo,
         )
         scripted: Dict[int, List[Detection]] = {
             k: list(v) for k, v in mock_scenario._scripted.items()
@@ -154,8 +159,8 @@ def _get_demo_scenario_assets(
             )
             frames.append(frame)
 
-        _DEMO_FRAMES_CACHE = (frames, scripted)
-        return _DEMO_FRAMES_CACHE
+        _DEMO_FRAMES_CACHE[cache_key] = (frames, scripted)
+        return frames, scripted
 
 
 def _resolve_local_path(raw_path: str) -> Path:
@@ -241,7 +246,7 @@ class TaskStreamRunner:
     def _build_pipeline(self) -> None:
         raw_source = (self.task.video_source or self.config.video_source or "").strip()
         is_demo = (
-            raw_source.lower() == "demo"
+            raw_source.lower() in ("demo", VIOLATION_DEMO_SOURCE)
             or self.config.detector_type == DetectorType.MOCK
         )
         self.is_demo_simulation = is_demo
@@ -270,7 +275,9 @@ class TaskStreamRunner:
         playback_mode = str(getattr(self.config, "playback_mode", "native") or "native").strip().lower()
 
         if is_demo:
-            frames, scripted = _get_demo_scenario_assets(num_frames=180)
+            frames, scripted = _get_demo_scenario_assets(
+                num_frames=180, violation_demo=raw_source.lower() == VIOLATION_DEMO_SOURCE
+            )
             idx_by_id = {id(fr): idx for idx, fr in enumerate(frames)}
             num_frames = len(frames)
             self.detector = MockDetectorAdapter(

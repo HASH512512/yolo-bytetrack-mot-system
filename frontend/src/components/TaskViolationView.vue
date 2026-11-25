@@ -1,11 +1,11 @@
 <template>
-  <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+  <div class="min-w-0">
     <!-- Left Column: Task CRUD Management (5 cols) -->
-    <div class="lg:col-span-5 space-y-4">
+    <div v-if="view === 'tasks'" class="space-y-4">
       <div class="card space-y-3">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-2">
-            <span class="text-base font-bold text-slate-100">监控任务管理</span>
+            <h2 class="text-base font-semibold text-slate-100">已保存任务</h2>
             <span class="badge badge-blue text-xs">{{ store.tasks.length }} 个任务</span>
           </div>
           <button @click="openCreateModal" class="btn btn-primary text-xs py-1.5 px-3">
@@ -26,13 +26,12 @@
           <div
             v-for="task in store.tasks"
             :key="task.id"
-            class="p-3 rounded-lg border transition-all cursor-pointer"
+            class="p-3 rounded-lg border transition-colors"
             :class="
               store.activeTaskId === task.id
-                ? 'bg-slate-800/90 border-indigo-500 shadow-md shadow-indigo-500/10'
+                ? 'bg-slate-800/90 border-teal-800'
                 : 'bg-slate-800/40 border-slate-700/60 hover:bg-slate-800/70'
             "
-            @click="store.setActiveTask(task.id)"
           >
             <div class="flex items-start justify-between gap-2">
               <div class="min-w-0 flex-1">
@@ -40,15 +39,14 @@
                   <span class="font-medium text-sm text-slate-100 truncate">{{ task.name }}</span>
                   <span
                     v-if="store.activeTaskId === task.id"
-                    class="badge badge-indigo text-[10px] bg-indigo-500/20 text-indigo-300 border border-indigo-500/30"
+                    class="badge badge-green text-[10px]"
                   >
-                    <span>当前激活</span>
+                    <span>当前监控</span>
                   </span>
                 </div>
                 <div class="text-xs text-slate-400 mt-1 flex flex-wrap gap-x-3 gap-y-1">
                   <span class="truncate max-w-[220px]" :title="task.video_source">源: {{ task.video_source }}</span>
                   <span class="uppercase text-cyan-300">{{ task.config.detector_type || 'mock' }}</span>
-                  <span>{{ task.config.fps }} FPS</span>
                   <span v-if="task.config.adaptive_skip" class="text-emerald-300">
                     <span>跳帧&le;{{ task.config.max_skip_stride || 2 }}</span>
                   </span>
@@ -56,26 +54,29 @@
                 <div v-if="task.config.model_path" class="text-[11px] text-slate-500 mt-0.5 truncate">
                   <span>权重: {{ task.config.model_path }}</span>
                 </div>
-                <div class="flex flex-wrap gap-1 mt-1.5 text-[10px]">
-                  <span class="badge py-0 px-1.5" :class="task.config.use_class_aware !== false ? 'badge-blue' : 'badge-gray'">
-                    <span>ClassAware</span>
-                  </span>
-                  <span class="badge py-0 px-1.5" :class="task.config.use_nsa ? 'badge-blue' : 'badge-gray'">
-                    <span>NSA</span>
-                  </span>
-                  <span class="badge py-0 px-1.5" :class="task.config.use_diou ? 'badge-blue' : 'badge-gray'">
-                    <span>DIoU</span>
-                  </span>
-                  <span class="badge py-0 px-1.5" :class="task.config.use_vdc !== false ? 'badge-blue' : 'badge-gray'">
-                    <span>VDC</span>
-                  </span>
-                  <span class="badge py-0 px-1.5" :class="task.config.use_oru !== false ? 'badge-blue' : 'badge-gray'">
-                    <span>ORU</span>
-                  </span>
-                  <span class="badge py-0 px-1.5" :class="task.config.use_lazy_appearance !== false ? 'badge-blue' : 'badge-gray'">
-                    <span>LazyHSV</span>
-                  </span>
-                </div>
+                <details class="mt-2 text-xs text-slate-400">
+                  <summary class="cursor-pointer">跟踪算法配置</summary>
+                  <div class="flex flex-wrap gap-1 mt-1.5">
+                    <span class="badge py-0 px-1.5" :class="task.config.use_class_aware !== false ? 'badge-blue' : 'badge-gray'">
+                      <span>ClassAware</span>
+                    </span>
+                    <span class="badge py-0 px-1.5" :class="task.config.use_nsa ? 'badge-blue' : 'badge-gray'">
+                      <span>NSA</span>
+                    </span>
+                    <span class="badge py-0 px-1.5" :class="task.config.use_diou ? 'badge-blue' : 'badge-gray'">
+                      <span>DIoU</span>
+                    </span>
+                    <span class="badge py-0 px-1.5" :class="task.config.use_vdc !== false ? 'badge-blue' : 'badge-gray'">
+                      <span>VDC</span>
+                    </span>
+                    <span class="badge py-0 px-1.5" :class="task.config.use_oru !== false ? 'badge-blue' : 'badge-gray'">
+                      <span>ORU</span>
+                    </span>
+                    <span class="badge py-0 px-1.5" :class="task.config.use_lazy_appearance !== false ? 'badge-blue' : 'badge-gray'">
+                      <span>LazyHSV</span>
+                    </span>
+                  </div>
+                </details>
               </div>
 
               <!-- Status Badge -->
@@ -96,7 +97,8 @@
             </div>
 
             <!-- Task Action Buttons -->
-            <div class="flex items-center justify-end gap-2 mt-3 pt-2 border-t border-slate-700/40">
+            <div class="flex flex-wrap items-center justify-end gap-2 mt-3 pt-2 border-t border-slate-700/40">
+              <button type="button" class="btn btn-secondary text-xs" @click="openMonitor(task.id)">打开监控</button>
               <button
                 v-if="task.status !== 'running'"
                 @click.stop="store.startTask(task.id)"
@@ -128,11 +130,11 @@
     </div>
 
     <!-- Right Column: Violations Alert & Audit Log (7 cols) -->
-    <div class="lg:col-span-7 space-y-4">
+    <div v-else class="space-y-4">
       <div class="card space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-2">
           <div class="flex items-center gap-2">
-            <span class="text-base font-bold text-slate-100">违章事件预警看板</span>
+            <h2 class="text-base font-semibold text-slate-100">事件记录</h2>
             <span
               v-if="store.unacknowledgedViolations.length > 0"
               class="badge badge-red text-xs animate-pulse"
@@ -141,6 +143,15 @@
             </span>
           </div>
 
+          <label class="flex flex-wrap items-center gap-2 text-sm text-slate-300">
+            任务
+            <select class="workspace-field" :value="store.activeTaskId ?? ''" @change="selectEventTask">
+              <option value="" disabled>请选择任务</option>
+              <option v-for="task in store.tasks" :key="task.id" :value="task.id">{{ task.name }}</option>
+            </select>
+          </label>
+        </div>
+        <div class="flex flex-wrap gap-2">
           <!-- Filter Tabs -->
           <div class="flex flex-wrap items-center gap-1 bg-slate-800 p-1 rounded-lg text-xs">
             <button
@@ -232,23 +243,23 @@
     </div>
 
     <!-- Create Task Modal -->
-    <div
-      v-if="showCreateModal"
-      class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
-    >
-      <div class="card w-full max-w-xl bg-slate-900 border-slate-700 space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+    <dialog v-if="view === 'tasks'" ref="createDialog" class="source-dialog" aria-labelledby="task-dialog-title" @cancel="cancelCreate">
+      <div class="space-y-4">
         <div class="flex items-center justify-between border-b border-slate-800 pb-3">
-          <h3 class="text-base font-bold text-slate-100">新建跟踪监测任务</h3>
-          <button @click="showCreateModal = false" class="text-slate-400 hover:text-slate-200">&#x2715;</button>
+          <h2 id="task-dialog-title" class="text-base font-semibold text-slate-100">新建跟踪任务</h2>
+          <button type="button" class="btn btn-secondary" :disabled="creatingTask" @click="createDialog?.close()">关闭</button>
         </div>
 
         <form @submit.prevent="handleCreateTask" class="space-y-3 text-xs">
           <div>
-            <label class="block text-slate-300 mb-1 font-medium">任务名称</label>
+            <label for="task-name" class="block text-slate-300 mb-1 font-medium">任务名称</label>
             <input
+              id="task-name"
               v-model="newTaskForm.name"
               type="text"
               required
+              autofocus
+              maxlength="100"
               placeholder="例如: 校园东门主干道监控 (CAM-02)"
               class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
             />
@@ -349,18 +360,19 @@
           <!-- FPS & Adaptive Keyframe Stride -->
           <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div>
-              <label class="block text-slate-300 mb-1 font-medium">目标帧率 (FPS)</label>
+              <label class="block text-slate-300 mb-1 font-medium">读取限速 (FPS)</label>
               <input
                 v-model.number="newTaskForm.fps"
                 type="number"
-                min="5"
-                max="60"
+                min="0"
+                max="1000"
                 class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
               />
             </div>
             <div>
-              <label class="block text-slate-300 mb-1 font-medium">WS 推流 (Hz)</label>
+              <label for="track-sample-rate" class="block text-slate-300 mb-1 font-medium">轨迹记录频率 (Hz)</label>
               <input
+                id="track-sample-rate"
                 v-model.number="newTaskForm.downsample_fps"
                 type="number"
                 min="1"
@@ -469,18 +481,19 @@
           <div class="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
             <button
               type="button"
-              @click="showCreateModal = false"
+              :disabled="creatingTask"
+              @click="createDialog?.close()"
               class="btn btn-secondary text-xs py-1.5 px-3"
             >
               <span>取消</span>
             </button>
-            <button type="submit" class="btn btn-primary text-xs py-1.5 px-4">
-              <span>创建任务</span>
+            <button type="submit" class="btn btn-primary text-xs py-1.5 px-4" :disabled="creatingTask">
+              {{ creatingTask ? '正在创建…' : '创建任务' }}
             </button>
           </div>
         </form>
       </div>
-    </div>
+    </dialog>
   </div>
 </template>
 
@@ -488,8 +501,11 @@
 import { computed, ref } from 'vue';
 import { useMotStore } from '../stores/motStore';
 
+defineProps<{ view: 'tasks' | 'violations' }>();
+
 const store = useMotStore();
-const showCreateModal = ref(false);
+const createDialog = ref<HTMLDialogElement | null>(null);
+const creatingTask = ref(false);
 const activeFilter = ref('all');
 const createError = ref<string | null>(null);
 const videoSourcePreset = ref('demo');
@@ -529,7 +545,7 @@ function isWrongWay(type: string): boolean {
 }
 
 const filteredViolations = computed(() => {
-  const list = store.violations;
+  const list = store.violations.filter((event) => event.task_id === store.activeTaskId);
   if (activeFilter.value === 'all') return list;
   if (activeFilter.value === 'unack') return list.filter((v) => !v.acknowledged);
   if (activeFilter.value === 'wrong_way') {
@@ -538,10 +554,28 @@ const filteredViolations = computed(() => {
   return list.filter((v) => v.violation_type === activeFilter.value);
 });
 
+function openMonitor(id: number) {
+  store.taskError = null;
+  store.setActiveTask(id);
+  void store.fetchViolations();
+  store.activeTab = 'monitoring';
+}
+
+function selectEventTask(event: Event) {
+  const id = Number((event.target as HTMLSelectElement).value);
+  if (!id) return;
+  store.setActiveTask(id);
+  void store.fetchViolations();
+}
+
 function openCreateModal() {
   createError.value = null;
-  store.fetchLocalAssets();
-  showCreateModal.value = true;
+  void store.fetchLocalAssets();
+  createDialog.value?.showModal();
+}
+
+function cancelCreate(event: Event) {
+  if (creatingTask.value) event.preventDefault();
 }
 
 function onVideoPresetChange() {
@@ -614,7 +648,8 @@ function formatTime(ts: number): string {
 
 async function handleCreateTask() {
   createError.value = null;
-  if (!newTaskForm.value.name.trim()) return;
+  if (!newTaskForm.value.name.trim() || creatingTask.value) return;
+  creatingTask.value = true;
   const f = newTaskForm.value;
   const created = await store.createTask({
     name: f.name.trim(),
@@ -639,8 +674,9 @@ async function handleCreateTask() {
       use_recovery_pool: f.use_recovery_pool,
     },
   });
+  creatingTask.value = false;
   if (created) {
-    showCreateModal.value = false;
+    createDialog.value?.close();
     newTaskForm.value.name = '';
   } else {
     createError.value = store.taskError || '创建任务失败，请检查输入参数或本地路径';

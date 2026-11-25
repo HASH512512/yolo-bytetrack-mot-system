@@ -8,7 +8,7 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Generator, List, Optional, Sequence, Tuple
 
 from backend.schemas import (
     StreamConfig,
@@ -192,22 +192,40 @@ class Database:
     # ==================== Task CRUD ====================
 
     def create_task(self, task: TaskCreate) -> TaskRead:
+        with self.transaction() as cur:
+            return self._insert_task(cur, task)
+
+    def get_or_create_task_for_source(
+        self, task: TaskCreate, create_zones: Callable[[int], Sequence[ZoneCreate]]
+    ) -> TaskRead:
+        """Provision a built-in source and its zones atomically."""
+        with self.transaction() as cur:
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute(
+                "SELECT * FROM tasks WHERE video_source = ? ORDER BY id LIMIT 1",
+                (task.video_source,),
+            )
+            row = cur.fetchone()
+            if row:
+                return self._row_to_task(row)
+            created = self._insert_task(cur, task)
+            for zone in create_zones(created.id):
+                self._insert_zone(cur, zone)
+            return created
+
+    def _insert_task(self, cur: sqlite3.Cursor, task: TaskCreate) -> TaskRead:
         now = _now_iso()
         config_obj = task.config or StreamConfig(video_source=task.video_source)
-        config_json = config_obj.model_dump_json()
-
-        with self.transaction() as cur:
-            cur.execute(
-                """
-                INSERT INTO tasks (name, video_source, status, config, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (task.name, task.video_source, TaskStatus.IDLE.value, config_json, now, now),
-            )
-            task_id = cur.lastrowid
+        cur.execute(
+            """
+            INSERT INTO tasks (name, video_source, status, config, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (task.name, task.video_source, TaskStatus.IDLE.value, config_obj.model_dump_json(), now, now),
+        )
 
         return TaskRead(
-            id=task_id,
+            id=cur.lastrowid,
             name=task.name,
             video_source=task.video_source,
             status=TaskStatus.IDLE,
@@ -273,31 +291,33 @@ class Database:
     # ==================== Zone CRUD ====================
 
     def create_zone(self, zone: ZoneCreate) -> ZoneRead:
+        with self.transaction() as cur:
+            return self._insert_zone(cur, zone)
+
+    def _insert_zone(self, cur: sqlite3.Cursor, zone: ZoneCreate) -> ZoneRead:
         now = _now_iso()
         polygon_json = json.dumps(zone.polygon)
         dir_json = json.dumps(zone.direction_vector) if zone.direction_vector else None
 
-        with self.transaction() as cur:
-            cur.execute(
-                """
-                INSERT INTO zones (task_id, name, zone_type, polygon, direction_vector, speed_limit, dwell_limit_sec, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    zone.task_id,
-                    zone.name,
-                    zone.zone_type.value,
-                    polygon_json,
-                    dir_json,
-                    zone.speed_limit,
-                    zone.dwell_limit_sec,
-                    now,
-                ),
-            )
-            zone_id = cur.lastrowid
+        cur.execute(
+            """
+            INSERT INTO zones (task_id, name, zone_type, polygon, direction_vector, speed_limit, dwell_limit_sec, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                zone.task_id,
+                zone.name,
+                zone.zone_type.value,
+                polygon_json,
+                dir_json,
+                zone.speed_limit,
+                zone.dwell_limit_sec,
+                now,
+            ),
+        )
 
         return ZoneRead(
-            id=zone_id,
+            id=cur.lastrowid,
             task_id=zone.task_id,
             name=zone.name,
             zone_type=zone.zone_type,
